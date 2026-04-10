@@ -1,34 +1,76 @@
-import sys
-from pathlib import Path
-
+import pytest
 import torch
+import torch.nn as nn
+from rh_memory.decoder import RHDecoder, RHLoss
 
+@pytest.fixture
+def dummy_data():
+    batch_size = 2
+    C = 16
+    n = 64
+    d_model = 32
+    n_heads = 4
+    num_layers = 2
+    
+    tokens = torch.randn(batch_size, C, 4)
+    # Ensure realistic magnitudes (positive) and signs
+    magnitudes = torch.abs(torch.randn(batch_size, C))
+    
+    # Ground truth positions (random sequence indices)
+    gt_indices = torch.randint(0, n, (batch_size, C))
+    targets = torch.zeros(batch_size, C, n)
+    targets.scatter_(2, gt_indices.unsqueeze(2), 1.0)
+    
+    return {
+        'batch_size': batch_size,
+        'C': C,
+        'n': n,
+        'd_model': d_model,
+        'n_heads': n_heads,
+        'num_layers': num_layers,
+        'tokens': tokens,
+        'targets': targets,
+        'magnitudes': magnitudes,
+        'gt_indices': gt_indices
+    }
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+def test_decoder_forward(dummy_data):
+    decoder = RHDecoder(
+        sequence_length=dummy_data['n'],
+        bucket_count=dummy_data['C'],
+        d_model=dummy_data['d_model'],
+        n_heads=dummy_data['n_heads'],
+        num_layers=dummy_data['num_layers']
+    )
+    
+    tokens = dummy_data['tokens']
+    logits = decoder(tokens)
+    
+    assert logits.shape == (dummy_data['batch_size'], dummy_data['C'], dummy_data['n']), \
+        f"Expected output shape {(dummy_data['batch_size'], dummy_data['C'], dummy_data['n'])}, but got {logits.shape}"
 
+def test_decoder_reconstruction(dummy_data):
+    decoder = RHDecoder(
+        sequence_length=dummy_data['n'],
+        bucket_count=dummy_data['C'],
+        d_model=dummy_data['d_model'],
+        n_heads=dummy_data['n_heads'],
+        num_layers=dummy_data['num_layers']
+    )
+    
+    logits = torch.randn(dummy_data['batch_size'], dummy_data['C'], dummy_data['n'])
+    reconstructed = decoder.reconstruct(logits)
+    
+    assert reconstructed.shape == (dummy_data['batch_size'], dummy_data['n']), \
+        f"Expected reconstructed shape {(dummy_data['batch_size'], dummy_data['n'])}, but got {reconstructed.shape}"
 
-def test_decoder_forward_and_loss():
-    from rh_memory import DecoderConfig, RHMemoryDecoder, build_support_target, weighted_bce_with_logits
-
-    torch.manual_seed(0)
-
-    config = DecoderConfig(n_slots=16, n_buckets=4, model_dim=32, num_heads=4, num_layers=2)
-    decoder = RHMemoryDecoder(config)
-
-    values = torch.tensor([[1.5, -2.0, 0.0, 3.0]], dtype=torch.float32)
-    dib = torch.tensor([[0.0, 1.0, 2.0, 1.0]], dtype=torch.float32)
-    gamma = torch.tensor([[0.9, 0.8, 0.7, 0.6]], dtype=torch.float32)
-    memory_type = False
-
-    logits = decoder(values, dib, gamma, memory_type)
-    assert logits.shape == (1, 16)
-
-    original = torch.tensor([[0.0, 1.5, 0.0, -2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
-    target, pos_weight = build_support_target(original)
-    assert target.shape == original.shape
-    assert pos_weight.shape == original.shape
-    assert torch.equal(target, (original != 0).to(dtype=original.dtype))
-
-    loss = weighted_bce_with_logits(logits, target, positive_weight=pos_weight)
-    assert torch.isfinite(loss)
-    assert loss.ndim == 0
+def test_rh_loss(dummy_data):
+    loss_fn = RHLoss()
+    logits = torch.randn(dummy_data['batch_size'], dummy_data['C'], dummy_data['n'])
+    
+    # Calculate loss
+    loss = loss_fn(logits, dummy_data['targets'], dummy_data['magnitudes'])
+    
+    assert loss.dim() == 0, "Loss should be a scalar"
+    assert not torch.isnan(loss), "Loss should not be NaN"
+    assert loss.item() > 0, "Loss should be positive"

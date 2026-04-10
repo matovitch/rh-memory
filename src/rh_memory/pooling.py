@@ -1,1 +1,0 @@
-"""RH pooling primitives."""

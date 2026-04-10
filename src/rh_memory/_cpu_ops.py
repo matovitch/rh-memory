@@ -9,7 +9,7 @@ from torch.utils.cpp_extension import load
 
 
 def extension_available() -> bool:
-    return hasattr(torch.ops.rh_memory_v2, "cpu_rh_write")
+    return hasattr(torch.ops.rh_memory, "cpu_rh_write")
 
 
 def cpu_rh_advance_time(
@@ -21,13 +21,13 @@ def cpu_rh_advance_time(
 ):
     source_path = Path(__file__).resolve().parents[2] / "csrc" / "rh_cpu.cpp"
     load(
-        name="rh_memory_cpu_v2",
+        name="rh_memory_cpu",
         sources=[str(source_path)],
         extra_cflags=["-O3"],
         is_python_module=False,
         verbose=False,
     )
-    return torch.ops.rh_memory_v2.cpu_rh_advance_time(
+    return torch.ops.rh_memory.cpu_rh_advance_time(
         table_values,
         table_gamma,
         cutoff_bound_slow_mag,
@@ -43,32 +43,26 @@ def cpu_rh_write(
     incoming_values: torch.Tensor,
     incoming_indices: torch.Tensor,
     incoming_gammas: torch.Tensor,
-    cutoff_bound_slow_mag: torch.Tensor,
-    cutoff_bound_slow_gamma: torch.Tensor,
     capacity: int,
     a: int = 1,
-    b: int = 0,
 ):
     source_path = Path(__file__).resolve().parents[2] / "csrc" / "rh_cpu.cpp"
     load(
-        name="rh_memory_cpu_v2",
+        name="rh_memory_cpu",
         sources=[str(source_path)],
         extra_cflags=["-O3"],
         is_python_module=False,
         verbose=False,
     )
-    return torch.ops.rh_memory_v2.cpu_rh_write(
+    return torch.ops.rh_memory.cpu_rh_write(
         table_values,
         table_dib,
         table_gamma,
         incoming_values,
         incoming_indices,
         incoming_gammas,
-        cutoff_bound_slow_mag,
-        cutoff_bound_slow_gamma,
         capacity,
         a,
-        b,
     )
 
 
@@ -79,30 +73,24 @@ def cpu_rh_write_batched(
     incoming_values: torch.Tensor,
     incoming_indices: torch.Tensor,
     incoming_gammas: torch.Tensor,
-    cutoff_bound_slow_mag: torch.Tensor,
-    cutoff_bound_slow_gamma: torch.Tensor,
     capacity: int,
     a: int = 1,
-    b: int = 0,
 ):
     source_path = Path(__file__).resolve().parents[2] / "csrc" / "rh_cpu.cpp"
     load(
-        name="rh_memory_cpu_v2",
+        name="rh_memory_cpu",
         sources=[str(source_path)],
         extra_cflags=["-O3"],
         is_python_module=False,
         verbose=False,
     )
-    return torch.ops.rh_memory_v2.cpu_rh_write_batched(
+    return torch.ops.rh_memory.cpu_rh_write_batched(
         table_values,
         table_dib,
         table_gamma,
         incoming_values,
         incoming_indices,
         incoming_gammas,
-        cutoff_bound_slow_mag,
-        cutoff_bound_slow_gamma,
         capacity,
         a,
-        b,
     )

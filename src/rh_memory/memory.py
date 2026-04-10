@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from ._cpu_ops import cpu_rh_advance_time, cpu_rh_write, cpu_rh_write_batched
-from ._python_ops import python_rh_write_batched
+from ._python_ops import python_rh_write_batched, python_fast_rh_write_batched
 
 
 def compute_write_gammas(
@@ -28,17 +28,85 @@ def truncate_sorted_write(
 	cutoff_bound_slow_mag: torch.Tensor | float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 	effective_magnitudes = sorted_values.abs()
-	threshold = torch.as_tensor(
-		cutoff_bound_slow_mag,
-		device=effective_magnitudes.device,
-		dtype=effective_magnitudes.dtype,
-	)
-	cutoff = torch.searchsorted(-effective_magnitudes, -threshold).item()
-	return (
-		sorted_values[:cutoff],
-		sort_permutation[:cutoff],
-		sorted_gammas[:cutoff],
-	)
+	
+	if isinstance(cutoff_bound_slow_mag, float):
+		threshold = torch.full((sorted_values.size(0), 1), cutoff_bound_slow_mag, device=sorted_values.device, dtype=sorted_values.dtype)
+	else:
+		threshold = cutoff_bound_slow_mag.unsqueeze(1).to(sorted_values.device, sorted_values.dtype) # type: ignore
+
+	active_mask = effective_magnitudes >= threshold
+	lengths = active_mask.sum(dim=1)
+	
+	if lengths.numel() == 0 or lengths.max().item() == 0:
+		return (
+			torch.empty((sorted_values.size(0), 0), device=sorted_values.device, dtype=sorted_values.dtype),
+			torch.empty((sorted_values.size(0), 0), device=sorted_values.device, dtype=torch.long),
+			torch.empty((sorted_values.size(0), 0), device=sorted_values.device, dtype=sorted_values.dtype),
+		)
+		
+	max_cutoff = int(lengths.max().item())
+	
+	padded_values  = sorted_values    [:, :max_cutoff] * active_mask[:, :max_cutoff]
+	padded_indices = sort_permutation [:, :max_cutoff] * active_mask[:, :max_cutoff]
+	padded_gammas  = sorted_gammas    [:, :max_cutoff] * active_mask[:, :max_cutoff]
+	
+	return padded_values, padded_indices, padded_gammas
+
+@dataclass
+class BatchedFastMemoryState:
+	values: torch.Tensor
+	dib: torch.Tensor
+	gamma: torch.Tensor
+
+	@classmethod
+	def empty(
+		cls,
+		batch_size: int,
+		capacity: int,
+		dtype: torch.dtype = torch.float32,
+		device: torch.device | str = "cpu",
+	) -> "BatchedFastMemoryState":
+		values = torch.zeros(batch_size, capacity, dtype=dtype, device=device)
+		dib = torch.zeros(batch_size, capacity, dtype=torch.long, device=device)
+		gamma = torch.zeros(batch_size, capacity, dtype=dtype, device=device)
+		return cls(values=values, dib=dib, gamma=gamma)
+
+	def write(
+		self,
+		incoming_values: torch.Tensor,
+		incoming_gammas: torch.Tensor,
+		a: int,
+		k: int,
+	) -> "BatchedFastMemoryState":
+		self.advance_time()
+		return self.write_python(
+			incoming_values,
+			incoming_gammas,
+			a,
+			k,
+		)
+
+	def write_python(
+		self,
+		incoming_values: torch.Tensor,
+		incoming_gammas: torch.Tensor,
+		a: int,
+		k: int,
+	) -> "BatchedFastMemoryState":
+		self.values, self.dib, self.gamma = python_fast_rh_write_batched(
+			self.values,
+			self.dib,
+			self.gamma,
+			incoming_values,
+			incoming_gammas,
+			a,
+			k,
+		)
+		return self
+
+	def advance_time(self) -> "BatchedFastMemoryState":
+		self.values *= self.gamma
+		return self
 
 @dataclass
 class BatchedSlowMemoryState:
@@ -63,6 +131,38 @@ class BatchedSlowMemoryState:
 		cutoff_bound_slow_gamma = torch.zeros(batch_size, dtype=dtype, device=device)
 		return cls(values=values, dib=dib, gamma=gamma, cutoff_bound_slow_mag=cutoff_bound_slow_mag, cutoff_bound_slow_gamma=cutoff_bound_slow_gamma)
 
+	def write(
+		self,
+		incoming_values: torch.Tensor,
+		incoming_gammas: torch.Tensor,
+		capacity: int,
+		delta_steps: int,
+		a: int = 1,
+		use_cpp: bool = True,
+	) -> "BatchedSlowMemoryState":
+		
+		self.advance_time(delta_steps)
+
+		abs_vals = incoming_values.abs()
+		_, sort_permutation = torch.sort(abs_vals, dim=-1, descending=True)
+		sorted_values = torch.gather(incoming_values, dim=1, index=sort_permutation)
+		sorted_gammas = torch.gather(incoming_gammas, dim=1, index=sort_permutation)
+
+		trunc_vals, trunc_idx, trunc_gammas = truncate_sorted_write(
+			sorted_values,
+			sort_permutation,
+			sorted_gammas,
+			self.cutoff_bound_slow_mag,
+		)
+
+		if trunc_vals.size(1) > 0:
+			if use_cpp:
+				self.write_cpp(trunc_vals, trunc_idx, trunc_gammas, capacity, a)
+			else:
+				self.write_python(trunc_vals, trunc_idx, trunc_gammas, capacity, a)
+
+		return self
+
 	def write_python(
 		self,
 		incoming_values: torch.Tensor,
@@ -70,20 +170,16 @@ class BatchedSlowMemoryState:
 		incoming_gammas: torch.Tensor,
 		capacity: int,
 		a: int = 1,
-		b: int = 0,
 	) -> "BatchedSlowMemoryState":
-		self.values, self.dib, self.gamma, self.cutoff_bound_slow_mag, self.cutoff_bound_slow_gamma = rh_write_batched_python(
+		self.values, self.dib, self.gamma = rh_write_batched_python(
 			self.values,
 			self.dib,
 			self.gamma,
 			incoming_values,
 			incoming_indices,
 			incoming_gammas,
-			self.cutoff_bound_slow_mag,
-			self.cutoff_bound_slow_gamma,
 			capacity,
 			a,
-			b,
 		)
 		return self
 
@@ -94,20 +190,16 @@ class BatchedSlowMemoryState:
 		incoming_gammas: torch.Tensor,
 		capacity: int,
 		a: int = 1,
-		b: int = 0,
 	) -> "BatchedSlowMemoryState":
-		self.values, self.dib, self.gamma, self.cutoff_bound_slow_mag, self.cutoff_bound_slow_gamma = rh_write_batched_cpp(
+		self.values, self.dib, self.gamma = rh_write_batched_cpp(
 			self.values,
 			self.dib,
 			self.gamma,
 			incoming_values,
 			incoming_indices,
 			incoming_gammas,
-			self.cutoff_bound_slow_mag,
-			self.cutoff_bound_slow_gamma,
 			capacity,
 			a,
-			b,
 		)
 		return self
 
@@ -115,14 +207,13 @@ class BatchedSlowMemoryState:
 		self,
 		delta_steps: int,
 	) -> "BatchedSlowMemoryState":
-		if delta_steps > 0:
-			self.values, self.gamma, self.cutoff_bound_slow_mag, self.cutoff_bound_slow_gamma = cpu_rh_advance_time(
-				self.values,
-				self.gamma,
-				self.cutoff_bound_slow_mag,
-				self.cutoff_bound_slow_gamma,
-				delta_steps,
-			)
+		self.values, self.gamma, self.cutoff_bound_slow_mag, self.cutoff_bound_slow_gamma = cpu_rh_advance_time(
+			self.values,
+			self.gamma,
+			self.cutoff_bound_slow_mag,
+			self.cutoff_bound_slow_gamma,
+			delta_steps,
+		)
 		return self
 
 def rh_write_batched_python(
@@ -132,12 +223,9 @@ def rh_write_batched_python(
 		incoming_values: torch.Tensor,
 		incoming_indices: torch.Tensor,
 		incoming_gammas: torch.Tensor,
-		cutoff_bound_slow_mag: torch.Tensor,
-		cutoff_bound_slow_gamma: torch.Tensor,
 		capacity: int,
 		a: int = 1,
-		b: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 	return python_rh_write_batched(
 		self_values,
 		self_dib,
@@ -145,11 +233,8 @@ def rh_write_batched_python(
 		incoming_values,
 		incoming_indices,
 		incoming_gammas,
-		cutoff_bound_slow_mag,
-		cutoff_bound_slow_gamma,
 		capacity,
 		a,
-		b,
 	)
 
 
@@ -160,12 +245,9 @@ def rh_write_batched_cpp(
 		incoming_values: torch.Tensor,
 		incoming_indices: torch.Tensor,
 		incoming_gammas: torch.Tensor,
-		cutoff_bound_slow_mag: torch.Tensor,
-		cutoff_bound_slow_gamma: torch.Tensor,
 		capacity: int,
 		a: int = 1,
-		b: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 	return cpu_rh_write_batched(
 		self_values,
 		self_dib,
@@ -173,9 +255,6 @@ def rh_write_batched_cpp(
 		incoming_values,
 		incoming_indices,
 		incoming_gammas,
-		cutoff_bound_slow_mag,
-		cutoff_bound_slow_gamma,
 		capacity,
 		a,
-		b,
 	)

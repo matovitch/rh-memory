@@ -46,7 +46,6 @@ def test_batched_python_and_cpp_write_match():
         incoming_gammas,
         capacity,
         1,
-        0,
     )
     cpp_state.write_cpp(
         incoming_values,
@@ -54,7 +53,6 @@ def test_batched_python_and_cpp_write_match():
         incoming_gammas,
         capacity,
         1,
-        0,
     )
 
     assert torch.allclose(python_state.values, cpp_state.values)
@@ -66,7 +64,7 @@ def test_batched_python_and_cpp_write_match():
     assert torch.all(python_state.values[occupied] >= 0)
 
 
-def test_full_table_write_uses_fast_path_and_matches_python():
+def test_write_on_prepopulated_table_matches_python():
     from rh_memory import (
         BatchedSlowMemoryState,
         compute_write_gammas,
@@ -94,7 +92,6 @@ def test_full_table_write_uses_fast_path_and_matches_python():
         incoming_gammas,
         capacity,
         1,
-        0,
     )
     cpp_state.write_cpp(
         incoming_values,
@@ -102,7 +99,6 @@ def test_full_table_write_uses_fast_path_and_matches_python():
         incoming_gammas,
         capacity,
         1,
-        0,
     )
 
     assert torch.allclose(python_state.values, cpp_state.values)
@@ -112,7 +108,7 @@ def test_full_table_write_uses_fast_path_and_matches_python():
     assert torch.allclose(python_state.cutoff_bound_slow_gamma, cpp_state.cutoff_bound_slow_gamma)
 
 
-def test_first_write_can_fill_empty_table():
+def test_zero_initialized_table_writes_match_python_and_cpp():
     from rh_memory import (
         BatchedSlowMemoryState,
         compute_write_gammas,
@@ -122,6 +118,10 @@ def test_first_write_can_fill_empty_table():
     capacity = 4
     python_state = BatchedSlowMemoryState.empty(batch_size, capacity)
     cpp_state = BatchedSlowMemoryState.empty(batch_size, capacity)
+
+    assert torch.all(python_state.values == 0)
+    assert torch.all(python_state.dib == 0)
+    assert torch.all(python_state.gamma == 0)
 
     incoming_values = torch.tensor(
         [
@@ -144,7 +144,6 @@ def test_first_write_can_fill_empty_table():
         incoming_gammas,
         capacity,
         1,
-        0,
     )
     cpp_state.write_cpp(
         incoming_values,
@@ -152,7 +151,6 @@ def test_first_write_can_fill_empty_table():
         incoming_gammas,
         capacity,
         1,
-        0,
     )
 
     assert torch.allclose(python_state.values, cpp_state.values)
@@ -193,3 +191,81 @@ def test_advance_time_recomputes_exact_cutoff_for_nonuniform_gammas():
     assert torch.allclose(state.values, expected_values)
     assert torch.allclose(state.cutoff_bound_slow_mag, torch.tensor([1.6]))
     assert torch.allclose(state.cutoff_bound_slow_gamma, torch.tensor([0.8]))
+
+
+def test_fast_memory_basic_routing_and_collision():
+    from rh_memory import BatchedFastMemoryState
+    
+    batch_size = 1
+    capacity = 4
+    n = 8
+    state = BatchedFastMemoryState.empty(batch_size, capacity)
+    
+    # We set a = 1
+    # Elements:
+    # index 0, 1, 2, 3 in stride 0 -> bucket 0, 1, 2, 3 (since r=0, shift=0)
+    # index 4, 5, 6, 7 in stride 1 -> bucket 1, 2, 3, 0 (r=1, a=1, shift=1)
+    
+    # Let's put a highly valued element at n=0 -> bucket 0
+    # And one at n=7 -> bucket 0 too
+    # If the one at n=7 is smaller, it bounces to bucket 1
+    # If the one at n=7 is bigger, it takes bucket 0, and n=0 would bounce? 
+    # Wait, the loop processes all contenders for bucket c simultaneously.
+    
+    incoming_values = torch.tensor([[10.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]])
+    incoming_gammas = torch.tensor([[0.9] * 8])
+    
+    # step 0:
+    # candidates for bucket 0: n=0 (value 10.0) from stride 0, and n=7 (value 8.0) from stride 1
+    # Max is 10.0. Bucket 0 gets 10.0. Element n=0 gets zeroed out.
+    # candidates for bucket 1: n=1 (value 2.0) from stride 0, and n=4 (value 5.0) from stride 1
+    # Max is 5.0. Bucket 1 gets 5.0. Element n=4 gets zeroed out.
+    # candidates for bucket 2: n=2 (value 3.0) from stride 0, and n=5 (value 6.0) from stride 1
+    # Max is 6.0. Bucket 2 gets 6.0. Element n=5 gets zeroed out.
+    # candidates for bucket 3: n=3 (value 4.0) from stride 0, and n=6 (value 7.0) from stride 1
+    # Max is 7.0. Bucket 3 gets 7.0. Element n=6 gets zeroed out.
+    
+    # This leaves n=1 (2.0), n=2 (3.0), n=3 (4.0), n=7 (8.0).
+    # Roll by 1.
+    # Now: candidate for bucket 1 is 8.0 (from n=7's row) and 0 (from n=0's row) -> bucket 1 incumbent is 5.0. 8.0 > 5.0, so 8.0 takes bucket 1.
+    # candidate for bucket 2 is 2.0 (from n=1) -> bucket 2 incumbent is 6.0. No update.
+    # candidate for bucket 3 is 3.0 (from n=2) -> bucket 3 incumbent is 7.0. No update.
+    # candidate for bucket 0 is 4.0 (from n=3) -> bucket 0 incumbent is 10.0. No update.
+    
+    # Result should be roughly: [10.0, 8.0, 6.0, 7.0]
+    
+    state.write_python(incoming_values, incoming_gammas, a=1, k=2)
+    expected_values = torch.tensor([[10.0, 8.0, 6.0, 7.0]])
+    expected_dib = torch.tensor([[0, 1, 0, 0]], dtype=torch.long)
+    
+    assert torch.allclose(state.values, expected_values)
+    assert torch.allclose(state.dib, expected_dib)
+
+
+def test_fast_memory_erase_logic():
+    from rh_memory import BatchedFastMemoryState
+    
+    state = BatchedFastMemoryState.empty(1, 2)
+    # n = 4 (stride = 2). capacity = 2. a = 1
+    # n=0, n=1 (stride 0)
+    # n=2, n=3 (stride 1)
+    
+    # We want to test that a winner is zeroed and does NOT overwrite next buckets.
+    # n=0: 10.0, n=1: 1.0, n=2: 5.0, n=3: 5.0
+    # step 0:
+    # bucket 0 candidates: 10.0 (n=0) and 5.0 (n=3) -> 10.0 wins (bucket 0).
+    # bucket 1 candidates: 1.0 (n=1) and 5.0 (n=2) -> 5.0 wins (bucket 1).
+    # Winners zeroed: n=0 and n=2.
+    
+    # step 1: (rolled by 1)
+    # bucket 1 candidates: 0.0 (old n=0) and 5.0 (n=3). incumbent bucket 1 is 5.0. 5.0 > 5.0 is False, no overwrite.
+    # bucket 0 candidates: 1.0 (old n=1) and 0.0 (old n=2). incumbent bucket 0 is 10.0. no overwrite.
+    
+    # If the erase didn't work, old n=0 (10.0) would roll to bucket 1 and overwrite the 5.0 there!
+    incoming_values = torch.tensor([[10.0, 1.0, 5.0, 5.0]])
+    incoming_gammas = torch.tensor([[0.5, 0.5, 0.5, 0.5]])
+    
+    state.write_python(incoming_values, incoming_gammas, a=1, k=3)
+    
+    expected_values = torch.tensor([[10.0, 5.0]])
+    assert torch.allclose(state.values, expected_values)

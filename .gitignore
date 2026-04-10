@@ -5,3 +5,7 @@
 
 # Python cache
 __pycache__/
+
+# Pytorch artifacts
+*.pt
+*.pth

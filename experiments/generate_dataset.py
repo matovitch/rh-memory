@@ -8,8 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from rh_memory._cpu_ops import cpu_rh_write_batched
 
-def generate_split(num_samples: int, chunk_size: int, n: int, C: int, out_path: Path):
-    print(f"Generating {num_samples} synthetic samples (n={n}, C={C}) for {out_path.name}...")
+def generate_split(num_samples: int, chunk_size: int, n: int, C: int, r: int, out_path: Path):
+    print(f"Generating {num_samples} synthetic samples (n={n}, C={C}, r={r}) for {out_path.name}...")
     
     all_tokens = []
     all_targets = []
@@ -67,7 +67,8 @@ def generate_split(num_samples: int, chunk_size: int, n: int, C: int, out_path: 
             sort_permutation,
             sorted_gammas,
             capacity=C,
-            a=1
+            a=1,
+            r=r
         )
         
         # Safely Reconstruct Indices
@@ -98,7 +99,7 @@ def generate_split(num_samples: int, chunk_size: int, n: int, C: int, out_path: 
         'targets': torch.cat(all_targets, dim=0),
         'magnitudes': torch.cat(all_magnitudes, dim=0),
         'indices': torch.cat(all_indices, dim=0),
-        'meta': {'n': n, 'C': C}
+        'meta': {'n': n, 'C': C, 'r': r}
     }
     
     torch.save(dataset, out_path)
@@ -112,6 +113,7 @@ def main():
     chunk_size = 128
     n = 1024
     C = 128
+    r = int(C * 0.1)  # 10% dropout sinks
     
     out_dir = Path(__file__).parent
     
@@ -120,7 +122,8 @@ def main():
         num_samples=10112, 
         chunk_size=chunk_size, 
         n=n, 
-        C=C, 
+        C=C,
+        r=r,
         out_path=out_dir / "synthetic_dataset_train.pt"
     )
     
@@ -130,6 +133,7 @@ def main():
         chunk_size=chunk_size, 
         n=n, 
         C=C, 
+        r=r,
         out_path=out_dir / "synthetic_dataset_test.pt"
     )
 

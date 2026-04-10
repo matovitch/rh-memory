@@ -45,6 +45,7 @@ def cpu_rh_write(
     incoming_gammas: torch.Tensor,
     capacity: int,
     a: int = 1,
+    r: int = 0,
 ):
     source_path = Path(__file__).resolve().parents[2] / "csrc" / "rh_cpu.cpp"
     load(
@@ -63,6 +64,7 @@ def cpu_rh_write(
         incoming_gammas,
         capacity,
         a,
+        r,
     )
 
 
@@ -75,6 +77,7 @@ def cpu_rh_write_batched(
     incoming_gammas: torch.Tensor,
     capacity: int,
     a: int = 1,
+    r: int = 0,
 ):
     source_path = Path(__file__).resolve().parents[2] / "csrc" / "rh_cpu.cpp"
     load(
@@ -93,4 +96,5 @@ def cpu_rh_write_batched(
         incoming_gammas,
         capacity,
         a,
+        r,
     )

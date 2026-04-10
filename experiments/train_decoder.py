@@ -32,6 +32,9 @@ def main():
     # Metadata
     n = train_dict['meta']['n']
     C = train_dict['meta']['C']
+    r = train_dict['meta'].get('r', 0)
+    
+    print(f"Dataset meta - n={n}, C={C}, r={r} (dropout sinks)")
     
     train_dataset = TensorDataset(
         train_dict['tokens_4d'], train_dict['targets'], 

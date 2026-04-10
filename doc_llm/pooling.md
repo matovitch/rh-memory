@@ -37,3 +37,9 @@ Implemented as a scalar element-wise Exact Robin Hood hash insertion logic.
   - If a collision occurs, the element with the larger `dib` (the poorer item) takes the bucket, and the displaced item is pushed to the next bucket ($dib_{displaced} \gets dib_{displaced} + 1$).
   - (Note: The incumbent magnitudes are already pre-aged by a separate `advance_time` pass before this insertion process begins).
 - Output states managed: `values[C]`, `dib[C]`, `gamma[C]`.
+
+### Dropout Sinks (Parameter `r`)
+- A deterministic memory block can suffer catastrophic probe cascades $\mathcal{O}(C)$ at load factor near 1.0. 
+- A parameter `r` (default 0) specifies the number of random slots to convert into "dropout sinks" at the start of a write batch.
+- **Mechanism:** `r` uniformly chosen buckets have their `dib` temporarily marked as `-1`. During insertion, if any item (incoming or being displaced) probes a slot with `dib == -1`, it is discarded immediately and the cascade terminates. Post-batch, the original `dib`s of the sinks are restored.
+- **Benefits:** Simulates a $\sim(1 - r/C)$ load factor preventing cascade worst-cases, while acting as memory dropout regularization.

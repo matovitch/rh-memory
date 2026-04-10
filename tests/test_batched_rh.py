@@ -44,15 +44,13 @@ def test_batched_python_and_cpp_write_match():
         incoming_values,
         incoming_indices,
         incoming_gammas,
-        capacity,
-        1,
+1,
     )
     cpp_state.write_cpp(
         incoming_values,
         incoming_indices,
         incoming_gammas,
-        capacity,
-        1,
+1,
     )
 
     assert torch.allclose(python_state.values, cpp_state.values)
@@ -90,15 +88,13 @@ def test_write_on_prepopulated_table_matches_python():
         incoming_values,
         incoming_indices,
         incoming_gammas,
-        capacity,
-        1,
+1,
     )
     cpp_state.write_cpp(
         incoming_values,
         incoming_indices,
         incoming_gammas,
-        capacity,
-        1,
+1,
     )
 
     assert torch.allclose(python_state.values, cpp_state.values)
@@ -142,15 +138,13 @@ def test_zero_initialized_table_writes_match_python_and_cpp():
         incoming_values,
         incoming_indices,
         incoming_gammas,
-        capacity,
-        1,
+1,
     )
     cpp_state.write_cpp(
         incoming_values,
         incoming_indices,
         incoming_gammas,
-        capacity,
-        1,
+1,
     )
 
     assert torch.allclose(python_state.values, cpp_state.values)
@@ -234,7 +228,7 @@ def test_fast_memory_basic_routing_and_collision():
     
     # Result should be roughly: [10.0, 8.0, 6.0, 7.0]
     
-    state.write_python(incoming_values, incoming_gammas, a=1, k=2)
+    state.write_python(incoming_values, a=1, k=2)
     expected_values = torch.tensor([[10.0, 8.0, 6.0, 7.0]])
     expected_dib = torch.tensor([[0, 1, 0, 0]], dtype=torch.long)
     
@@ -265,7 +259,42 @@ def test_fast_memory_erase_logic():
     incoming_values = torch.tensor([[10.0, 1.0, 5.0, 5.0]])
     incoming_gammas = torch.tensor([[0.5, 0.5, 0.5, 0.5]])
     
-    state.write_python(incoming_values, incoming_gammas, a=1, k=3)
+    state.write_python(incoming_values, a=1, k=3)
     
     expected_values = torch.tensor([[10.0, 5.0]])
     assert torch.allclose(state.values, expected_values)
+
+def test_batched_cpp_write_with_dropout_sinks():
+    from rh_memory import BatchedSlowMemoryState, compute_write_gammas
+    from rh_memory._cpu_ops import cpu_rh_write_batched
+    import torch
+
+    torch.manual_seed(42)
+    batch_size = 1
+    capacity = 100
+    
+    state = BatchedSlowMemoryState.empty(batch_size, capacity)
+    
+    incoming_values = torch.randn(batch_size, capacity)
+    abs_vals = incoming_values.abs()
+    _, sort_permutation = torch.sort(abs_vals, dim=-1, descending=True)
+    sorted_values = torch.gather(incoming_values, dim=1, index=sort_permutation)
+    sorted_gammas = torch.ones_like(sorted_values)
+    
+    # We expect some items to be dropped because `r` bounds the insertions
+    out_values, out_dib, out_gamma = cpu_rh_write_batched(
+        state.values.clone(),
+        state.dib.clone(),
+        state.gamma.clone(),
+        sorted_values,
+        sort_permutation,
+        sorted_gammas,
+        capacity=capacity,
+        a=1,
+        r=10
+    )
+    
+    # Just asserting it runs without error and returns valid states
+    assert out_values.shape == (batch_size, capacity)
+    assert out_dib.shape == (batch_size, capacity)
+    assert out_gamma.shape == (batch_size, capacity)

@@ -57,6 +57,10 @@ class BatchedFastMemoryState:
 	values: torch.Tensor
 	dib: torch.Tensor
 	gamma: torch.Tensor
+	alpha: float = 1.0
+	epsilon: float = 0.05
+	a: int = 1
+	k: int = 1
 
 	@classmethod
 	def empty(
@@ -65,42 +69,38 @@ class BatchedFastMemoryState:
 		capacity: int,
 		dtype: torch.dtype = torch.float32,
 		device: torch.device | str = "cpu",
+		alpha: float = 1.0,
+		epsilon: float = 0.05,
+		a: int = 1,
+		k: int = 1,
 	) -> "BatchedFastMemoryState":
 		values = torch.zeros(batch_size, capacity, dtype=dtype, device=device)
 		dib = torch.zeros(batch_size, capacity, dtype=torch.long, device=device)
 		gamma = torch.zeros(batch_size, capacity, dtype=dtype, device=device)
-		return cls(values=values, dib=dib, gamma=gamma)
+		return cls(values=values, dib=dib, gamma=gamma, alpha=alpha, epsilon=epsilon, a=a, k=k)
 
 	def write(
 		self,
 		incoming_values: torch.Tensor,
-		incoming_gammas: torch.Tensor,
-		a: int,
-		k: int,
 	) -> "BatchedFastMemoryState":
 		self.advance_time()
 		return self.write_python(
 			incoming_values,
-			incoming_gammas,
-			a,
-			k,
 		)
 
 	def write_python(
 		self,
 		incoming_values: torch.Tensor,
-		incoming_gammas: torch.Tensor,
-		a: int,
-		k: int,
 	) -> "BatchedFastMemoryState":
+		incoming_gammas = compute_write_gammas(incoming_values, self.alpha, self.epsilon)
 		self.values, self.dib, self.gamma = python_fast_rh_write_batched(
 			self.values,
 			self.dib,
 			self.gamma,
 			incoming_values,
 			incoming_gammas,
-			a,
-			k,
+			self.a,
+			self.k,
 		)
 		return self
 
@@ -115,6 +115,14 @@ class BatchedSlowMemoryState:
 	gamma: torch.Tensor
 	cutoff_bound_slow_mag: torch.Tensor
 	cutoff_bound_slow_gamma: torch.Tensor
+	alpha: float = 1.0
+	epsilon: float = 0.05
+	a: int = 1
+	use_cpp: bool = True
+
+	@property
+	def capacity(self) -> int:
+		return self.values.size(1)
 
 	@classmethod
 	def empty(
@@ -123,25 +131,27 @@ class BatchedSlowMemoryState:
 		capacity: int,
 		dtype: torch.dtype = torch.float32,
 		device: torch.device | str = "cpu",
+		alpha: float = 1.0,
+		epsilon: float = 0.05,
+		a: int = 1,
+		use_cpp: bool = True,
 	) -> "BatchedSlowMemoryState":
 		values = torch.zeros(batch_size, capacity, dtype=dtype, device=device)
 		dib = torch.zeros(batch_size, capacity, dtype=torch.long, device=device)
 		gamma = torch.zeros(batch_size, capacity, dtype=dtype, device=device)
 		cutoff_bound_slow_mag = torch.zeros(batch_size, dtype=dtype, device=device)
 		cutoff_bound_slow_gamma = torch.zeros(batch_size, dtype=dtype, device=device)
-		return cls(values=values, dib=dib, gamma=gamma, cutoff_bound_slow_mag=cutoff_bound_slow_mag, cutoff_bound_slow_gamma=cutoff_bound_slow_gamma)
+		return cls(values=values, dib=dib, gamma=gamma, cutoff_bound_slow_mag=cutoff_bound_slow_mag, cutoff_bound_slow_gamma=cutoff_bound_slow_gamma, alpha=alpha, epsilon=epsilon, a=a, use_cpp=use_cpp)
 
 	def write(
 		self,
 		incoming_values: torch.Tensor,
-		incoming_gammas: torch.Tensor,
-		capacity: int,
 		delta_steps: int,
-		a: int = 1,
-		use_cpp: bool = True,
 	) -> "BatchedSlowMemoryState":
 		
 		self.advance_time(delta_steps)
+		
+		incoming_gammas = compute_write_gammas(incoming_values, self.alpha, self.epsilon)
 
 		abs_vals = incoming_values.abs()
 		_, sort_permutation = torch.sort(abs_vals, dim=-1, descending=True)
@@ -156,10 +166,10 @@ class BatchedSlowMemoryState:
 		)
 
 		if trunc_vals.size(1) > 0:
-			if use_cpp:
-				self.write_cpp(trunc_vals, trunc_idx, trunc_gammas, capacity, a)
+			if self.use_cpp:
+				self.write_cpp(trunc_vals, trunc_idx, trunc_gammas)
 			else:
-				self.write_python(trunc_vals, trunc_idx, trunc_gammas, capacity, a)
+				self.write_python(trunc_vals, trunc_idx, trunc_gammas)
 
 		return self
 
@@ -168,8 +178,6 @@ class BatchedSlowMemoryState:
 		incoming_values: torch.Tensor,
 		incoming_indices: torch.Tensor,
 		incoming_gammas: torch.Tensor,
-		capacity: int,
-		a: int = 1,
 	) -> "BatchedSlowMemoryState":
 		self.values, self.dib, self.gamma = rh_write_batched_python(
 			self.values,
@@ -178,8 +186,8 @@ class BatchedSlowMemoryState:
 			incoming_values,
 			incoming_indices,
 			incoming_gammas,
-			capacity,
-			a,
+			capacity=self.capacity,
+			a=self.a,
 		)
 		return self
 
@@ -188,8 +196,6 @@ class BatchedSlowMemoryState:
 		incoming_values: torch.Tensor,
 		incoming_indices: torch.Tensor,
 		incoming_gammas: torch.Tensor,
-		capacity: int,
-		a: int = 1,
 	) -> "BatchedSlowMemoryState":
 		self.values, self.dib, self.gamma = rh_write_batched_cpp(
 			self.values,
@@ -198,8 +204,8 @@ class BatchedSlowMemoryState:
 			incoming_values,
 			incoming_indices,
 			incoming_gammas,
-			capacity,
-			a,
+			capacity=self.capacity,
+			a=self.a,
 		)
 		return self
 

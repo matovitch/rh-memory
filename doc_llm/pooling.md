@@ -1,45 +1,46 @@
 # RH-Memory: Pooling Operators
 
-This document defines the two mathematical variants of Robin Hood (RH) memory pooling mapping `[n]` sparse activations to `[C]` buckets.
+This document defines the mathematical variant of Robin Hood (RH) memory pooling mapping `[n]` sparse activations to `[C]` buckets. We use a **pure GPU-resident Exact Parallel Robin Hood** operator.
 
 ## Hashing Function Definition
+
 The mapping for an input index $i \in \{0, \dots, n-1\}$ into a container of capacity $C$ is defined by a quotient-mixed hash:
 $$ h(i) = \left( a \cdot \lfloor i / C \rfloor + i \right) \pmod C $$
 
-## 1. Fast Operator: Approximate GPU Pooling
-Implemented as a tensorized loop acting on folded feature matrices. Simulates open-addressing across `stride` bands.
+**Recommended Configuration for $a$:**
+
+- It is heavily advised that $n$ be perfectly divisible by $C$ ($n \pmod C = 0$). This guarantees that all $C$ buckets receive the exact same number of source tokens per sequence ($stride = n/C$), making the expected magnitude identically distributed instead of starving trailing buckets.
+- Given that $n$ is divisible by $C$, setting the coefficient **$a = n / C$** is mathematically optimal. This defines a uniform Torus-like topology framing across blocks where every $C$-length subgroup is shifted symmetrically by exactly $stride$. This structural regularity is extremely beneficial when paired with the Decoder's Transformer backbone and Relative Positional Encodings (RoPE), as the attention layers can natively leverage these translational equivariant offsets.
+
+## Exact Parallel RH Operator
+
+Implemented as a Triton kernel acting on the persistent memory table.
 
 ### Initialization & Constraints
+
 - Let $stride = n // C$.
-- The GPU table is always initialized. Starting states for empty slots: $values=0.0$, $dib=0$, $\gamma=0.0$.
+- The GPU table is initialized with: $values=0.0$, $dib=0$, $\gamma=0.0$.
 - Time decay is explicitly decoupled. The persistent table must be decayed via a separate `advance_time` step prior to executing this spatial pooling loop.
 
-### Compute Matrix Loop (Pseudocode Semantics)
-1. Reshape the input length `n` vector into matrix representations of size `[stride, C]`. This matrix defines the probe bands.
-2. For each row $r \in [0, \dots, stride-1]$, roll the row by $r \times a$ (quotient-mixed offset).
-3. Maintain aligned matrices for: `values`, `gamma`.
-4. Over $k$ max-erase-roll iterations:
-   a. Extract `current_winners_absolute = max(abs(values_matrix), axis=0)`. Compare these against the already-decayed GPU table state recursively.
-   b. Write updating columns for `[C]` to the persistent table:
-      - `values[C]`: The winning signed value.
-      - `dib[C]`: The loop iteration index $k$ (analogous to Distance to Initial Bucket).
-      - `gamma[C]`: The retention factor matching the winning item.
-   c. Scatter $0.0$ to the locations of the selected winners in `values_matrix` to prevent repeat victories.
-   d. Roll the matrix rows by 1 to simulate subsequent linear probe steps.
+### Parallel Scatter-Swap & Virtual DIB Tracking
 
-## 2. Slow Operator: Exact CPU Pooling
-Implemented as a scalar element-wise Exact Robin Hood hash insertion logic.
+Unlike approximate pooling that discards displaced elements, this exact parallel operator ensures no elements are unfairly dropped during collisions by utilizing two core mechanisms:
 
-### Insertion Logic
-- **Input Constraint:** The CPU strictly receives a batch that has **already been sorted** in descending magnitude and **thresholded/truncated** on the GPU. The CPU does no sorting.
-- Loop over elements:
-  - Hash elements to find the target bucket.
-  - If a collision occurs, the element with the larger `dib` (the poorer item) takes the bucket, and the displaced item is pushed to the next bucket ($dib_{displaced} \gets dib_{displaced} + 1$).
-  - (Note: The incumbent magnitudes are already pre-aged by a separate `advance_time` pass before this insertion process begins).
-- Output states managed: `values[C]`, `dib[C]`, `gamma[C]`.
+1. **Scatter-Swap**: When a collision occurs and an incoming element displaces an incumbent, the incumbent is *scattered* back into the probing pipeline slot vacated by the winner. It seamlessly continues probing the next buckets.
+2. **Virtual DIB Tracker**: To avoid repeatedly updating DIB values in the tracking pipeline, DIB is tracked via an algebraic offset: `base_dib_offset = table_dib - step`. For any displaced element, its effective DIB during subsequent probe steps is evaluated as `Effective DIB = (step + 1) + base_dib_offset = table_dib + 1`.
 
-### Dropout Sinks (Parameter `r`)
-- A deterministic memory block can suffer catastrophic probe cascades $\mathcal{O}(C)$ at load factor near 1.0. 
-- A parameter `r` (default 0) specifies the number of random slots to convert into "dropout sinks" at the start of a write batch.
-- **Mechanism:** `r` uniformly chosen buckets have their `dib` temporarily marked as `-1`. During insertion, if any item (incoming or being displaced) probes a slot with `dib == -1`, it is discarded immediately and the cascade terminates. Post-batch, the original `dib`s of the sinks are restored.
-- **Benefits:** Simulates a $\sim(1 - r/C)$ load factor preventing cascade worst-cases, while acting as memory dropout regularization.
+### Compute Loop (Semantics)
+
+1. Reshape the input length `n` vector into matrix representations of size `[stride, C]`.
+2. Initialize the `base_dib_offset` pipeline tensor to zeros.
+3. Over $k$ max iterations (where $k$ is empirically chosen to capture $>99\%$ of settlements):
+   a. Compute the `Effective DIB` for all elements currently in the pipeline.
+   b. Extract the max elements across the `stride` dimension targeting each bucket `c`, prioritized first by absolute magnitude, then by `Effective DIB` as a tie-breaker.
+   c. Compare the winning pipeline elements against the current table incumbents at bucket `c` (again using magnitude, then DIB).
+   d. For any pipeline element that wins:
+      - Write its `values`, `gamma`, and `Effective DIB` to the table at bucket `c`.
+      - Gather the displaced incumbent's `values`, `gamma`, and `dib`.
+      - Compute the incumbent's `base_dib_offset = dib - step`.
+      - Scatter these displaced attributes back into the pipeline slot that the winner vacated.
+   e. Zero out any pipeline elements that successfully wrote and did *not* displace an incumbent (or drop losers that couldn't beat the table natively, although this implies they either lacked magnitude or DIB).
+   f. Roll the pipeline row by 1 step to simulate the next linear probe for the remaining/displaced elements.

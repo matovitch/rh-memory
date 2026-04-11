@@ -1,3 +1,5 @@
+import sys; from pathlib import Path; sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 import pytest
 import torch
 import torch.nn as nn
@@ -12,7 +14,7 @@ def dummy_data():
     n_heads = 4
     num_layers = 2
     
-    tokens = torch.randn(batch_size, C, 4)
+    tokens = torch.randn(batch_size, C, 3)
     # Ensure realistic magnitudes (positive) and signs
     magnitudes = torch.abs(torch.randn(batch_size, C))
     

@@ -83,46 +83,45 @@ class RoPETransformerEncoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, src):
-        # MHA block
-        src2 = self.self_attn(src)
+        # MHA block (Pre-Norm)
+        src2 = self.norm1(src)
+        src2 = self.self_attn(src2)
         src = src + self.dropout1(src2)
-        src = self.norm1(src)
         
-        # FFN block
-        src2 = self.linear2(self.dropout(F.relu(self.linear1(src))))
+        # FFN block (Pre-Norm)
+        src2 = self.norm2(src)
+        src2 = self.linear2(self.dropout(F.relu(self.linear1(src2))))
         src = src + self.dropout2(src2)
-        src = self.norm2(src)
         return src
 
 class RHDecoder(nn.Module):
-    def __init__(self, sequence_length, bucket_count, d_model=256, n_heads=8, num_layers=4):
+    def __init__(self, sequence_length, bucket_count, d_model=256, n_heads=8, num_layers=4, dim_feedforward=2048, dropout=0.0):
         super().__init__()
         self.sequence_length = sequence_length
         self.bucket_count = bucket_count
         self.d_model = d_model
         
-        # Setup continuous projection: [B, C, 4] -> [B, C, D_model]
-        self.input_proj = nn.Linear(4, d_model)
+        # Setup continuous projection: [B, C, 3] -> [B, C, D_model]
+        self.input_proj = nn.Linear(3, d_model)
         
         # Deep N-layer Transformer backbone with continuous RoPE
         self.layers = nn.ModuleList([
-            RoPETransformerEncoderLayer(d_model, n_heads) 
+            RoPETransformerEncoderLayer(d_model, n_heads, dim_feedforward=dim_feedforward, dropout=dropout) 
             for _ in range(num_layers)
         ])
         
         # Dense head projecting back out to sequence domain: [B, C, D_model] -> [B, C, n]
         self.output_proj = nn.Linear(d_model, sequence_length)
 
-    def forward(self, tokens_4d):
+    def forward(self, tokens_3d):
         """
         Forward pass for the decoder backbone.
-        tokens_4d: float tensor shape [batch_size, C, 4] encapsulating:
+        tokens_3d: float tensor shape [batch_size, C, 3] encapsulating:
             1. signed_value (sign * magnitude)
             2. gamma
             3. DIB
-            4. memory_type (+1.0/-1.0)
         """
-        x = self.input_proj(tokens_4d)
+        x = self.input_proj(tokens_3d)
         
         for layer in self.layers:
             x = layer(x)

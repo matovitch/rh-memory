@@ -21,12 +21,11 @@ def test_batched_memory_initialization():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton tests require CUDA")
 def test_triton_exact_parallel_match_sequential():
-    from rh_memory import python_fast_rh_write_batched, triton_exact_parallel_rh # type: ignore
+    from rh_memory import python_exact_parallel_rh, triton_exact_parallel_rh
     
     torch.manual_seed(0)
     B = 2
     C = 128
-    a = 16
     stride = 8
     n = C * stride
     k = 24
@@ -42,8 +41,8 @@ def test_triton_exact_parallel_match_sequential():
     mask = (torch.rand(B, n, device="cuda") > 0.5).float()
     inc_vals *= mask
     
-    p_vals, p_dib, p_gams = python_fast_rh_write_batched(t_vals, t_dib, t_gams, inc_vals, inc_gams, a, k)
-    tr_vals, tr_dib, tr_gams = triton_exact_parallel_rh(t_vals, t_dib, t_gams, inc_vals, inc_gams, a, k)
+    p_vals, p_dib, p_gams = python_exact_parallel_rh(t_vals, t_dib, t_gams, inc_vals, inc_gams, k)
+    tr_vals, tr_dib, tr_gams = triton_exact_parallel_rh(t_vals, t_dib, t_gams, inc_vals, inc_gams, k)
     
     assert torch.allclose(p_vals, tr_vals, atol=1e-5), "Values mismatch"
     assert torch.equal(p_dib, tr_dib), "DIB mismatch"

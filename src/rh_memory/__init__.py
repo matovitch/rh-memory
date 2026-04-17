@@ -1,7 +1,7 @@
 """rh_memory package."""
 
 from ._cpu_ops import extension_available, cpu_rh_advance_time, cpu_rh_write, cpu_rh_write_batched
-from ._python_ops import python_fast_rh_write_batched
+from ._python_ops import python_exact_parallel_rh
 from ._triton_ops import triton_exact_parallel_rh
 from .memory import (
     BatchedMemoryState,
@@ -13,7 +13,7 @@ __all__ = [
     "cpu_rh_advance_time",
     "cpu_rh_write",
     "cpu_rh_write_batched",
-    "python_fast_rh_write_batched",
+    "python_exact_parallel_rh",
     "triton_exact_parallel_rh",
     "compute_write_gammas",
     "BatchedMemoryState",

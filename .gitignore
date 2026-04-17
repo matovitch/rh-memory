@@ -5,6 +5,7 @@
 
 # Python cache
 __pycache__/
+.rattler_cache/
 
 # Pytorch artifacts
 *.pt

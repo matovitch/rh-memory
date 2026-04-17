@@ -9,8 +9,9 @@
 
 namespace {
 
-inline int64_t normalized_hash(int64_t index, int64_t capacity, int64_t a) {
-  int64_t hashed = (a * (index / capacity) + index) % capacity;
+inline int64_t normalized_hash(int64_t index, int64_t capacity, int64_t n) {
+  int64_t r = index / capacity;
+  int64_t hashed = (((r * n + capacity / 2) / capacity) + index) % capacity;
   if (hashed < 0) {
     hashed += capacity;
   }
@@ -87,7 +88,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> cpu_rh_write(
     const at::Tensor& incoming_indices,
     const at::Tensor& incoming_gammas,
     int64_t capacity,
-    int64_t a,
+    int64_t n,
     int64_t r) {
   TORCH_CHECK(table_values.device().is_cpu(), "table_values must be a CPU tensor");
   TORCH_CHECK(table_dib.device().is_cpu(), "table_dib must be a CPU tensor");
@@ -204,7 +205,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> cpu_rh_write_batched(
     const at::Tensor& incoming_indices,
     const at::Tensor& incoming_gammas,
     int64_t capacity,
-    int64_t a,
+    int64_t n,
     int64_t r) {
   TORCH_CHECK(table_values.dim() == 2, "table_values must be 2D");
   TORCH_CHECK(table_dib.dim() == 2, "table_dib must be 2D");
@@ -232,7 +233,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> cpu_rh_write_batched(
         incoming_indices.select(0, batch),
         incoming_gammas.select(0, batch),
         capacity,
-        a,
+        n,
         r);
 
     out_values.select(0, batch).copy_(std::get<0>(batch_result));
@@ -244,8 +245,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> cpu_rh_write_batched(
 }
 
 TORCH_LIBRARY(rh_memory, m) {
-  m.def("cpu_rh_write(Tensor table_values, Tensor table_dib, Tensor table_gamma, Tensor incoming_values, Tensor incoming_indices, Tensor incoming_gammas, int capacity, int a=1, int r=0) -> (Tensor, Tensor, Tensor)");
-  m.def("cpu_rh_write_batched(Tensor table_values, Tensor table_dib, Tensor table_gamma, Tensor incoming_values, Tensor incoming_indices, Tensor incoming_gammas, int capacity, int a=1, int r=0) -> (Tensor, Tensor, Tensor)");
+  m.def("cpu_rh_write(Tensor table_values, Tensor table_dib, Tensor table_gamma, Tensor incoming_values, Tensor incoming_indices, Tensor incoming_gammas, int capacity, int n, int r=0) -> (Tensor, Tensor, Tensor)");
+  m.def("cpu_rh_write_batched(Tensor table_values, Tensor table_dib, Tensor table_gamma, Tensor incoming_values, Tensor incoming_indices, Tensor incoming_gammas, int capacity, int n, int r=0) -> (Tensor, Tensor, Tensor)");
   m.def("cpu_rh_advance_time(Tensor table_values, Tensor table_gamma, Tensor cutoff_bound_slow_mag, Tensor cutoff_bound_slow_gamma, int delta_steps) -> (Tensor, Tensor, Tensor, Tensor)");
 }
 

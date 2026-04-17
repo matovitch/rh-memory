@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from jaxtyping import Float
+from torch import Tensor
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, base=10000):
@@ -113,7 +115,7 @@ class RHDecoder(nn.Module):
         # Dense head projecting back out to sequence domain: [B, C, D_model] -> [B, C, n]
         self.output_proj = nn.Linear(d_model, sequence_length)
 
-    def forward(self, tokens_3d):
+    def forward(self, tokens_3d: Float[Tensor, "batch C 3"]) -> Float[Tensor, "batch C n"]:
         """
         Forward pass for the decoder backbone.
         tokens_3d: float tensor shape [batch_size, C, 3] encapsulating:
@@ -129,7 +131,7 @@ class RHDecoder(nn.Module):
         logits = self.output_proj(x)
         return logits
 
-    def reconstruct(self, logits):
+    def reconstruct(self, logits: Float[Tensor, "batch C n"]) -> Float[Tensor, "batch n"]:
         """
         Reconstructs the original [B, n] sequence using max extraction per bucket
         and reducing over collisions with scatter_add.
@@ -151,7 +153,7 @@ class RHLoss(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, logits, targets, magnitudes):
+    def forward(self, logits: Float[Tensor, "batch C n"], targets: Float[Tensor, "batch C n"], magnitudes: Float[Tensor, "batch C"]) -> Float[Tensor, ""]:
         """
         logits: FloatTensor [batch_size, C, n]
         targets: FloatTensor [batch_size, C, n] - sparse ground truth masks of `1.0` vs `0.0`.

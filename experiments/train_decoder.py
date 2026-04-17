@@ -12,48 +12,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from rh_memory.decoder import RHDecoder, RHLoss
 from rh_memory._cpu_ops import cpu_rh_write_batched
-from rh_memory._python_ops import python_fast_rh_write_batched
-from rh_memory._triton_ops import triton_exact_parallel_rh # type: ignore
+from rh_memory._python_ops import python_exact_parallel_rh
+from rh_memory._triton_ops import triton_exact_parallel_rh
 
 class SyntheticRHDataset(IterableDataset):
-    def __init__(self, n, C, chunk_size=128, num_samples=None, fast_k=32, device="cpu"):
+    def __init__(self, n, C, chunk_size=128, num_samples=None, fast_k=5, seed=42, device="cpu"):
         super().__init__()
         self.n = n
-        self.C = C
+        self.C_options = [C] if isinstance(C, int) else list(C)
         self.chunk_size = chunk_size
         self.num_samples = num_samples  # If None, infinite dataset
         self.fast_k = fast_k
+        self.seed = seed
         self.device = device
         
     def __iter__(self):
+        import random
         n = self.n
-        C = self.C
         chunk_size = self.chunk_size
         samples_generated = 0
         device = self.device
         
         while self.num_samples is None or samples_generated < self.num_samples:
+            C = random.choice(self.C_options)
+            k_eff = int(self.fast_k * math.log(C))
+            
             # Create base sine waves (B, n) with random frequencies and phases
             t = torch.linspace(0, 1, n, device=device).unsqueeze(0).expand(chunk_size, n)
-            freqs1 = torch.empty(chunk_size, 1, device=device).uniform_(2.0, 15.0)
-            phases1 = torch.empty(chunk_size, 1, device=device).uniform_(0.0, 2 * math.pi)
-            sine_waves = 1 - torch.sin(2 * math.pi * freqs1 * t + phases1).abs()
             
-            # Add high frequency noise and magnitude envelope
-            mag_env = torch.empty(chunk_size, 1, device=device).uniform_(0.5, 6.0)
-            sign = torch.where(torch.rand(chunk_size, n, device=device) < 0.5, -1.0, 1.0)
-            noise = torch.randn(chunk_size, n, device=device) * 0.0
-            signal = (sine_waves + noise) * mag_env * sign
-            
-            # Create block-sparse mask
-            blocks = n // 4
-            mask = torch.zeros(chunk_size, n, device=device)
-            rand_idx_in_block = torch.randint(0, 4, (chunk_size, blocks), device=device)
-            col_offsets = torch.arange(blocks, device=device).unsqueeze(0) * 4
-            abs_keep_idx = col_offsets + rand_idx_in_block
-            mask.scatter_(1, abs_keep_idx, 1.0)
-            
-            raw_inputs = signal * mask
+            num_peaks = random.randint(2, 5)
+            sum_peaks = 0
+            for _ in range(num_peaks):
+                a = torch.empty(chunk_size, 1, device=device).uniform_(0.0, 1.0)
+                b = torch.empty(chunk_size, 1, device=device).uniform_(3.0, 5.0)
+                mag_env = torch.empty(chunk_size, 1, device=device).uniform_(-1.0, 1.0)
+                sum_peaks = sum_peaks + (1 - (t - a).abs()).pow(b.exp()) * mag_env
+                
+            signs = torch.empty(chunk_size, n, device=device).uniform_(0.0, 1.0).round() * 2 - 1
+            raw_inputs = sum_peaks * signs
             
             # Start state bounds
             table_values = torch.zeros(chunk_size, C, dtype=torch.float32, device=device)
@@ -64,42 +60,64 @@ class SyntheticRHDataset(IterableDataset):
             # Fast pooling path uses triton kernel if on gpu
             incoming_gammas = torch.arange(n, dtype=torch.float32, device=device).unsqueeze(0).expand(chunk_size, n)
             
+            # Pad to multiple of C if necessary to satisfy exact_parallel_rh requirements
+            pad_len = (C - (n % C)) % C
+            padded_n = n + pad_len
+            
+            if pad_len > 0:
+                raw_inputs_padded = torch.nn.functional.pad(raw_inputs, (0, pad_len), value=0.0)
+                incoming_gammas_padded = torch.nn.functional.pad(incoming_gammas, (0, pad_len), value=-1.0)
+            else:
+                raw_inputs_padded = raw_inputs
+                incoming_gammas_padded = incoming_gammas
+            
             if "cuda" in str(device):
                 out_values, out_dib, out_gamma = triton_exact_parallel_rh(
                     table_values,
                     table_dib,
                     table_gamma,
-                    raw_inputs,
-                    incoming_gammas,
-                    a=16,
-                    k=self.fast_k,
+                    raw_inputs_padded,
+                    incoming_gammas_padded,
+                    k=k_eff,
+                    seed=self.seed,
                 )
             else:
-                out_values, out_dib, out_gamma = python_fast_rh_write_batched(
+                out_values, out_dib, out_gamma = python_exact_parallel_rh(
                     table_values,
                     table_dib,
                     table_gamma,
-                    raw_inputs,
-                    incoming_gammas,
-                    a=16,
-                    k=self.fast_k,
+                    raw_inputs_padded,
+                    incoming_gammas_padded,
+                    k=k_eff,
+                    seed=self.seed,
                 )
             
             out_indices = out_gamma.long()
+            
+            # Mask out invalid indices from padding
+            valid_mask = (out_indices >= 0) & (out_indices < n)
+            out_indices = torch.clamp(out_indices, 0, n - 1)
             
             # Restore the all-ones gamma for the neural network tokens to match original behavior
             decoder_gamma = torch.ones_like(out_gamma)
             tokens_3d = torch.stack([out_values, decoder_gamma, out_dib.float()], dim=-1)
             
             targets = torch.zeros(chunk_size, C, n, dtype=torch.float32, device=device)
-            targets.scatter_(2, out_indices.unsqueeze(2), 1.0)
-            magnitudes = out_values.abs()
+            # Only scatter valid indices
+            targets.scatter_(2, out_indices.unsqueeze(2), valid_mask.unsqueeze(2).float())
+            magnitudes = out_values.abs() * valid_mask.float()
             
-            for i in range(chunk_size):
-                if self.num_samples is not None and samples_generated >= self.num_samples:
-                    break
-                yield tokens_3d[i], targets[i], magnitudes[i], out_indices[i]
-                samples_generated += 1
+            if self.num_samples is None:
+                yield tokens_3d, targets, magnitudes, out_indices
+                samples_generated += chunk_size
+            else:
+                remaining = self.num_samples - samples_generated
+                if remaining > 0:
+                    if remaining < chunk_size:
+                        yield tokens_3d[:remaining], targets[:remaining], magnitudes[:remaining], out_indices[:remaining]
+                    else:
+                        yield tokens_3d, targets, magnitudes, out_indices
+                    samples_generated += min(remaining, chunk_size)
 
 
 def worker_init_fn(worker_id):
@@ -113,34 +131,36 @@ def main():
     
     # Metadata
     n = 1024
-    C = 128
+    C_options = [128]
     
-    print(f"Dataset meta - n={n}, C={C}")
+    print(f"Dataset meta - n={n}, C_options={C_options}")
     
     B = 128          # mini-batch size
-    train_dataset = SyntheticRHDataset(n=n, C=C, chunk_size=128, device=device) # type: ignore
-    test_dataset = SyntheticRHDataset(n=n, C=C, chunk_size=128, num_samples=1024, device=device) # type: ignore
+    train_dataset = SyntheticRHDataset(n=n, C=C_options, chunk_size=B, fast_k=5, seed=42, device=device)
+    test_dataset = SyntheticRHDataset(n=n, C=C_options, chunk_size=B, num_samples=1024, fast_k=5, seed=42, device=device)
     
     # If device is CUDA, use num_workers=0 to avoid CUDA multiprocessing issues
     workers = 0 if "cuda" in str(device) else 2
-    train_loader = DataLoader(train_dataset, batch_size=B, num_workers=workers, prefetch_factor=None, worker_init_fn=worker_init_fn)
-    test_loader = DataLoader(test_dataset, batch_size=B, num_workers=workers, prefetch_factor=None, worker_init_fn=worker_init_fn)
+    # Because SyntheticRHDataset yields whole batches, we set batch_size=None
+    train_loader = DataLoader(train_dataset, batch_size=None, num_workers=workers, prefetch_factor=None, worker_init_fn=worker_init_fn)
+    test_loader = DataLoader(test_dataset, batch_size=None, num_workers=workers, prefetch_factor=None, worker_init_fn=worker_init_fn)
     
     # Hyperparameters
     d_model = 256
-    total_steps = 17_000_000 // B
+    total_steps = 20_000_000 // B
     eval_every_steps = 50_000 // B
     learning_rate = 2e-4
     
-    print(f"Initializing RHDecoder [n={n}, C={C}, d_model={d_model}] on {device}")
+    # The decoder's bucket_count is not functionally used in the forward pass, 
+    # but we pass a specific value for its constructor.
+    print(f"Initializing RHDecoder [n={n}, max_C={max(C_options)}, d_model={d_model}] on {device}")
     decoder = RHDecoder(
         sequence_length=n,
-        bucket_count=C,
+        bucket_count=max(C_options),
         d_model=d_model,
         n_heads=8,
         num_layers=6,
-        dim_feedforward=d_model * 8,
-        dropout=0.0,
+        dim_feedforward=d_model * 4
     ).to(device)
     
     criterion = RHLoss()
@@ -168,10 +188,10 @@ def main():
         if step > total_steps:
             break
             
-        batch_tokens = batch[0].to(device)
-        batch_targets = batch[1].to(device)
+        batch_tokens     = batch[0].to(device)
+        batch_targets    = batch[1].to(device)
         batch_magnitudes = batch[2].to(device)
-        batch_indices = batch[3].to(device)
+        batch_indices    = batch[3].to(device)
         
         optimizer.zero_grad()
         
@@ -267,19 +287,20 @@ def main():
             b_idx = test_batch[3].to(device)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 logits = decoder(b_toks) # [B, C, n]
-            all_test_logits.append(logits.float().cpu())
-            all_test_indices.append(b_idx.cpu())
-            all_test_mags.append(b_mags.cpu())
             
-    all_logits_tensor = torch.cat(all_test_logits, dim=0) # [Total_B, C, n]
-    all_indices_tensor = torch.cat(all_test_indices, dim=0) # [Total_B, C]
-    all_mags_tensor = torch.cat(all_test_mags, dim=0) # [Total_B, C]
+            # Since C can vary between batches, we flatten the spatial dimensions 
+            # before appending, so we can concatenate them all together safely later.
+            n_seq_batch = logits.shape[-1]
+            all_test_logits.append(logits.float().cpu().view(-1, n_seq_batch))
+            all_test_indices.append(b_idx.cpu().view(-1))
+            all_test_mags.append(b_mags.cpu().view(-1))
+            
+    # Concatenate flattened outputs
+    all_logits_flat = torch.cat(all_test_logits, dim=0)       # [Total_B * C, n]
+    all_indices_flat = torch.cat(all_test_indices, dim=0)     # [Total_B * C]
+    all_mags_flat = torch.cat(all_test_mags, dim=0)           # [Total_B * C]
     
-    # Flatten outputs for filtering
-    n_seq = all_logits_tensor.shape[-1]
-    all_logits_flat = all_logits_tensor.view(-1, n_seq)       # [Total_B * C, n]
-    all_indices_flat = all_indices_tensor.view(-1)            # [Total_B * C]
-    all_mags_flat = all_mags_tensor.view(-1)                  # [Total_B * C]
+    n_seq = all_logits_flat.shape[-1]
     
     # Filter out empty buckets
     active_mask = all_mags_flat > 0.01

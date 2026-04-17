@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+from jaxtyping import Float, Int
+from torch import Tensor
 from torch.utils.cpp_extension import load
 
 
@@ -13,10 +15,10 @@ def extension_available() -> bool:
 
 
 def cpu_rh_advance_time(
-    table_values: torch.Tensor,
-    table_gamma: torch.Tensor,
-    cutoff_bound_slow_mag: torch.Tensor,
-    cutoff_bound_slow_gamma: torch.Tensor,
+    table_values: Float[Tensor, "batch capacity"],
+    table_gamma: Float[Tensor, "batch capacity"],
+    cutoff_bound_slow_mag: Float[Tensor, "batch"],
+    cutoff_bound_slow_gamma: Float[Tensor, "batch"],
     delta_steps: int,
 ):
     source_path = Path(__file__).resolve().parents[2] / "csrc" / "rh_cpu.cpp"
@@ -37,14 +39,14 @@ def cpu_rh_advance_time(
 
 
 def cpu_rh_write(
-    table_values: torch.Tensor,
-    table_dib: torch.Tensor,
-    table_gamma: torch.Tensor,
-    incoming_values: torch.Tensor,
-    incoming_indices: torch.Tensor,
-    incoming_gammas: torch.Tensor,
+    table_values: Float[Tensor, "capacity"],
+    table_dib: Int[Tensor, "capacity"],
+    table_gamma: Float[Tensor, "capacity"],
+    incoming_values: Float[Tensor, "n"],
+    incoming_indices: Int[Tensor, "n"],
+    incoming_gammas: Float[Tensor, "n"],
     capacity: int,
-    a: int = 1,
+    n: int,
     r: int = 0,
 ):
     source_path = Path(__file__).resolve().parents[2] / "csrc" / "rh_cpu.cpp"
@@ -63,20 +65,20 @@ def cpu_rh_write(
         incoming_indices,
         incoming_gammas,
         capacity,
-        a,
+        n,
         r,
     )
 
 
 def cpu_rh_write_batched(
-    table_values: torch.Tensor,
-    table_dib: torch.Tensor,
-    table_gamma: torch.Tensor,
-    incoming_values: torch.Tensor,
-    incoming_indices: torch.Tensor,
-    incoming_gammas: torch.Tensor,
+    table_values: Float[Tensor, "batch capacity"],
+    table_dib: Int[Tensor, "batch capacity"],
+    table_gamma: Float[Tensor, "batch capacity"],
+    incoming_values: Float[Tensor, "batch n"],
+    incoming_indices: Int[Tensor, "batch n"],
+    incoming_gammas: Float[Tensor, "batch n"],
     capacity: int,
-    a: int = 1,
+    n: int,
     r: int = 0,
 ):
     source_path = Path(__file__).resolve().parents[2] / "csrc" / "rh_cpu.cpp"
@@ -95,6 +97,6 @@ def cpu_rh_write_batched(
         incoming_indices,
         incoming_gammas,
         capacity,
-        a,
+        n,
         r,
     )

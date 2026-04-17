@@ -5,12 +5,11 @@ This document defines the mathematical variant of Robin Hood (RH) memory pooling
 ## Hashing Function Definition
 
 The mapping for an input index $i \in \{0, \dots, n-1\}$ into a container of capacity $C$ is defined by a quotient-mixed hash:
-$$ h(i) = \left( a \cdot \lfloor i / C \rfloor + i \right) \pmod C $$
+$$ h(i) = \left( \text{round}\left( \lfloor i / C \rfloor \cdot \frac{n}{C} \right) + i \right) \pmod C $$
 
-**Recommended Configuration for $a$:**
+It is heavily advised that $n$ be perfectly divisible by $C$ ($n \pmod C = 0$). This guarantees that all $C$ buckets receive the exact same number of source tokens per sequence ($stride = n/C$), making the expected magnitude identically distributed instead of starving trailing buckets.
 
-- It is heavily advised that $n$ be perfectly divisible by $C$ ($n \pmod C = 0$). This guarantees that all $C$ buckets receive the exact same number of source tokens per sequence ($stride = n/C$), making the expected magnitude identically distributed instead of starving trailing buckets.
-- Given that $n$ is divisible by $C$, setting the coefficient **$a = n / C$** is mathematically optimal. This defines a uniform Torus-like topology framing across blocks where every $C$-length subgroup is shifted symmetrically by exactly $stride$. This structural regularity is extremely beneficial when paired with the Decoder's Transformer backbone and Relative Positional Encodings (RoPE), as the attention layers can natively leverage these translational equivariant offsets.
+This formula intrinsically defines a uniform Torus-like topology framing across blocks where every $C$-length subgroup is shifted symmetrically by approximately $stride$. This structural regularity is extremely beneficial when paired with the Decoder's Transformer backbone and Relative Positional Encodings (RoPE), as the attention layers can natively leverage these translational equivariant offsets.
 
 ## Exact Parallel RH Operator
 

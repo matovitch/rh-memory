@@ -1,8 +1,10 @@
 """
-Compare Triton vs pure-PyTorch exact parallel Robin-Hood using torch.utils.benchmark.
+Compare Triton vs pure-PyTorch linear-probing-based amplitude pooling (torch.utils.benchmark).
 
 Run from the repo root (with CUDA), e.g.:
-  pixi run python benchmarks/bench_exact_parallel_rh.py
+  pixi run bench-lp-amplitude-pool
+  # or
+  python benchmarks/bench_linear_probing_amplitude_pooling.py
 """
 
 from __future__ import annotations
@@ -14,12 +16,14 @@ from pathlib import Path
 import torch
 from torch.utils.benchmark import Compare, Timer
 
-# package from source tree
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "src"))
 
-from rh_memory import python_exact_parallel_rh, triton_exact_parallel_rh  # noqa: E402
+from rh_memory import (  # noqa: E402
+    python_linear_probing_amplitude_pooling,
+    triton_linear_probing_amplitude_pooling,
+)
 
 
 def _make_inputs(
@@ -35,28 +39,28 @@ def _make_inputs(
     g.manual_seed(seed)
 
     t_vals = torch.zeros(B, C, dtype=torch.float32, device=device)
-    t_dib = torch.zeros(B, C, dtype=torch.long, device=device)
-    t_gams = torch.zeros(B, C, dtype=torch.float32, device=device)
+    t_dib = torch.zeros(B, C, dtype=torch.int32, device=device)
+    t_carry = torch.full((B, C), -1, dtype=torch.int32, device=device)
     inc_vals = torch.randn(B, n, dtype=torch.float32, device=device, generator=g)
-    inc_gams = torch.full((B, n), 0.9, dtype=torch.float32, device=device)
+    inc_carry = torch.arange(n, dtype=torch.int32, device=device).unsqueeze(0).expand(B, n)
     mask = (torch.rand(B, n, device=device, generator=g) > 0.5).to(inc_vals.dtype)
     inc_vals = inc_vals * mask
-    return t_vals, t_dib, t_gams, inc_vals, inc_gams, k
+    return t_vals, t_dib, t_carry, inc_vals, inc_carry, k
 
 
 def _warmup(
     t_vals: torch.Tensor,
     t_dib: torch.Tensor,
-    t_gams: torch.Tensor,
+    t_carry: torch.Tensor,
     inc_vals: torch.Tensor,
-    inc_gams: torch.Tensor,
+    inc_carry: torch.Tensor,
     k: int,
     iters: int = 4,
 ) -> None:
     for _ in range(iters):
-        triton_exact_parallel_rh(t_vals, t_dib, t_gams, inc_vals, inc_gams, k)
+        triton_linear_probing_amplitude_pooling(t_vals, t_dib, t_carry, inc_vals, inc_carry, k)
     for _ in range(iters):
-        python_exact_parallel_rh(t_vals, t_dib, t_gams, inc_vals, inc_gams, k)
+        python_linear_probing_amplitude_pooling(t_vals, t_dib, t_carry, inc_vals, inc_carry, k)
     torch.cuda.synchronize()
 
 
@@ -68,35 +72,35 @@ def bench_config(
     device: torch.device,
     seed: int,
 ) -> list:
-    t_vals, t_dib, t_gams, inc_vals, inc_gams, k_ = _make_inputs(
+    t_vals, t_dib, t_carry, inc_vals, inc_carry, k_ = _make_inputs(
         B, C, stride, k, device, seed=seed
     )
     assert k_ == k
-    _warmup(t_vals, t_dib, t_gams, inc_vals, inc_gams, k)
+    _warmup(t_vals, t_dib, t_carry, inc_vals, inc_carry, k)
 
     n = C * stride
     sub_label = f"B={B} n={n} C={C} stride={stride} k={k}"
     g: dict = {
         "t_vals": t_vals,
         "t_dib": t_dib,
-        "t_gams": t_gams,
+        "t_carry": t_carry,
         "inc_vals": inc_vals,
-        "inc_gams": inc_gams,
+        "inc_carry": inc_carry,
         "k": k,
         "torch": torch,
-        "python_exact_parallel_rh": python_exact_parallel_rh,
-        "triton_exact_parallel_rh": triton_exact_parallel_rh,
+        "python_linear_probing_amplitude_pooling": python_linear_probing_amplitude_pooling,
+        "triton_linear_probing_amplitude_pooling": triton_linear_probing_amplitude_pooling,
     }
 
     results = []
     for name, stmt in (
-        ("triton", "triton_exact_parallel_rh(t_vals, t_dib, t_gams, inc_vals, inc_gams, k)"),
-        ("python", "python_exact_parallel_rh(t_vals, t_dib, t_gams, inc_vals, inc_gams, k)"),
+        ("triton", "triton_linear_probing_amplitude_pooling(t_vals, t_dib, t_carry, inc_vals, inc_carry, k)"),
+        ("python", "python_linear_probing_amplitude_pooling(t_vals, t_dib, t_carry, inc_vals, inc_carry, k)"),
     ):
         timer = Timer(
             stmt=stmt,
             globals=g,
-            label="exact_parallel_rh",
+            label="linear_probing_amplitude_pooling",
             sub_label=sub_label,
             description=name,
         )
@@ -106,11 +110,13 @@ def bench_config(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark triton vs python exact_parallel_rh")
+    parser = argparse.ArgumentParser(
+        description="Benchmark triton vs python linear_probing_amplitude_pooling"
+    )
     parser.add_argument("--B", type=int, default=8, help="batch size")
     parser.add_argument("--C", type=int, default=128, help="table capacity")
     parser.add_argument("--stride", type=int, default=8, help="pipeline depth (n = C * stride)")
-    parser.add_argument("--k", type=int, default=24, help="RH iterations")
+    parser.add_argument("--k", type=int, default=24, help="pooling iterations")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--preset",

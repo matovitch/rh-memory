@@ -103,8 +103,8 @@ class RHDecoder(nn.Module):
         self.bucket_count = bucket_count
         self.d_model = d_model
         
-        # Setup continuous projection: [B, C, 3] -> [B, C, D_model]
-        self.input_proj = nn.Linear(3, d_model)
+        # Continuous projection: signed_value + DIB per bucket (carry_id stays inside pooler only).
+        self.input_proj = nn.Linear(2, d_model)
         
         # Deep N-layer Transformer backbone with continuous RoPE
         self.layers = nn.ModuleList([
@@ -115,15 +115,17 @@ class RHDecoder(nn.Module):
         # Dense head projecting back out to sequence domain: [B, C, D_model] -> [B, C, n]
         self.output_proj = nn.Linear(d_model, sequence_length)
 
-    def forward(self, tokens_3d: Float[Tensor, "batch C 3"]) -> Float[Tensor, "batch C n"]:
+    def forward(self, bucket_tokens: Float[Tensor, "batch C 2"]) -> Float[Tensor, "batch C n"]:
         """
         Forward pass for the decoder backbone.
-        tokens_3d: float tensor shape [batch_size, C, 3] encapsulating:
-            1. signed_value (sign * magnitude)
-            2. gamma
-            3. DIB
+
+        bucket_tokens: [batch_size, C, 2] — per bucket:
+            1. signed_value (signed amplitude sample from pooler table)
+            2. dib (distance to initial bucket as float)
+
+        Source indices (carry_id) are computed inside the pooler for targets only, not fed here.
         """
-        x = self.input_proj(tokens_3d)
+        x = self.input_proj(bucket_tokens)
         
         for layer in self.layers:
             x = layer(x)
@@ -153,11 +155,11 @@ class RHLoss(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, logits: Float[Tensor, "batch C n"], targets: Float[Tensor, "batch C n"], magnitudes: Float[Tensor, "batch C"]) -> Float[Tensor, ""]:
+    def forward(self, logits: Float[Tensor, "batch C n"], targets: Float[Tensor, "batch C n"], abs_amplitude: Float[Tensor, "batch C"]) -> Float[Tensor, ""]:
         """
         logits: FloatTensor [batch_size, C, n]
         targets: FloatTensor [batch_size, C, n] - sparse ground truth masks of `1.0` vs `0.0`.
-        magnitudes: FloatTensor [batch_size, C] - representing salience weight.
+        abs_amplitude: FloatTensor [batch_size, C] - per-bucket weight, typically |signed_value| for active slots.
         """
         B, C, n = logits.shape
         
@@ -168,9 +170,9 @@ class RHLoss(nn.Module):
             reduction='none'
         )
         
-        # BCE must be sample-weighted strictly by source magnitude.
+        # BCE weighted by absolute amplitude (salience) per bucket.
         # Shape broadcast: [B, C, n] * [B, C, 1]
-        weighted_loss = bce_loss_raw * magnitudes.unsqueeze(2)
+        weighted_loss = bce_loss_raw * abs_amplitude.unsqueeze(2)
         
         # Final reduction strategy (average over batch * sequence * buckets)
         return weighted_loss.mean()

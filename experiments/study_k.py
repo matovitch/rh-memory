@@ -22,23 +22,23 @@ def main():
         for C in C_options:
             print(f"\n--- Running study with n={n}, C={C}, batch_size={chunk_size}, fast_k={fast_k} ---")
             
-            # Use exactly the same generator as in training
+            # Use the same generator as in training
             dataset = SyntheticRHDataset(n=n, C=C, chunk_size=chunk_size, num_samples=chunk_size, fast_k=fast_k, seed=42, device=device)
             loader = torch.utils.data.DataLoader(dataset, batch_size=None, num_workers=0)
             
-            # Since num_samples=chunk_size, it will yield exactly 1 batch
+            # Since num_samples=chunk_size, it will yield a single batch
             try:
                 batch = next(iter(loader))
-                tokens_3d, targets, magnitudes, out_indices = batch
+                bucket_tokens, targets, abs_amplitude, out_indices = batch
             except StopIteration:
                 print("Failed to get batch.")
                 continue
                 
-            # tokens_3d is [B, C, 3] -> (out_values, decoder_gamma, out_dib)
-            out_dib = tokens_3d[..., 2]
+            # bucket_tokens is [B, C, 2] -> (out_values, out_dib)
+            out_dib = bucket_tokens[..., 1]
             
-            # Active slots are those with non-zero magnitudes
-            active_mask = magnitudes > 1e-7
+            # Active slots are those with non-zero absolute amplitude
+            active_mask = abs_amplitude > 1e-7
             valid_dibs = out_dib[active_mask].float()
             
             print(f"Total active slots filled: {active_mask.sum().item()} out of {chunk_size * C}")

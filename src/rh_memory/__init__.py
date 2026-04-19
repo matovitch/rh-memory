@@ -1,20 +1,9 @@
 """rh_memory package."""
 
-from ._cpu_ops import extension_available, cpu_rh_advance_time, cpu_rh_write, cpu_rh_write_batched
-from ._python_ops import python_exact_parallel_rh
-from ._triton_ops import triton_exact_parallel_rh
-from .memory import (
-    BatchedMemoryState,
-    compute_write_gammas,
-)
+from ._python_ops import python_linear_probing_amplitude_pooling
+from ._triton_ops import triton_linear_probing_amplitude_pooling
 
 __all__ = [
-    "extension_available",
-    "cpu_rh_advance_time",
-    "cpu_rh_write",
-    "cpu_rh_write_batched",
-    "python_exact_parallel_rh",
-    "triton_exact_parallel_rh",
-    "compute_write_gammas",
-    "BatchedMemoryState",
+    "python_linear_probing_amplitude_pooling",
+    "triton_linear_probing_amplitude_pooling",
 ]

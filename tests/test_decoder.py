@@ -14,9 +14,9 @@ def dummy_data():
     n_heads = 4
     num_layers = 2
     
-    tokens = torch.randn(batch_size, C, 3)
-    # Ensure realistic magnitudes (positive) and signs
-    magnitudes = torch.abs(torch.randn(batch_size, C))
+    tokens = torch.randn(batch_size, C, 2)
+    # Per-bucket BCE weights (here: random positive, like |amplitude|)
+    abs_amplitude = torch.abs(torch.randn(batch_size, C))
     
     # Ground truth positions (random sequence indices)
     gt_indices = torch.randint(0, n, (batch_size, C))
@@ -32,7 +32,7 @@ def dummy_data():
         'num_layers': num_layers,
         'tokens': tokens,
         'targets': targets,
-        'magnitudes': magnitudes,
+        'abs_amplitude': abs_amplitude,
         'gt_indices': gt_indices
     }
 
@@ -71,7 +71,7 @@ def test_rh_loss(dummy_data):
     logits = torch.randn(dummy_data['batch_size'], dummy_data['C'], dummy_data['n'])
     
     # Calculate loss
-    loss = loss_fn(logits, dummy_data['targets'], dummy_data['magnitudes'])
+    loss = loss_fn(logits, dummy_data['targets'], dummy_data['abs_amplitude'])
     
     assert loss.dim() == 0, "Loss should be a scalar"
     assert not torch.isnan(loss), "Loss should not be NaN"

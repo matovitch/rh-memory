@@ -1,45 +1,46 @@
 # RH-Memory: Pooling Operators
 
-This document defines the mathematical variant of Robin Hood (RH) memory pooling mapping `[n]` sparse activations to `[C]` buckets. We use a **pure GPU-resident Exact Parallel Robin Hood** operator.
+This document defines **linear-probing-based amplitude pooling**: mapping a length-`[n]` vector of signed samples into `[C]` table buckets via an open-addressing, scatter-swap dynamics (Python: `python_linear_probing_amplitude_pooling`; GPU: `triton_linear_probing_amplitude_pooling`). Both implementations require **``torch.float32``** ``table_values`` / ``incoming_values`` and **``torch.int32``** ``table_dib``, ``table_carry_id``, and ``incoming_carry_id``. The **Python** reference updates **table** state in place; **incoming** tensors are only **read** (permuted pipeline in gather buffers). **Triton** shares that gather and may stage **table** tensors to contiguous buffers when convenient, run the kernel (stride-axis **vectorized max** on absolute amplitude, strict compare vs ``|table|``), then copy back—**ownership is an optimization hint**, not a mandate to mutate every buffer in place. **Amplitude** here means the signal can be signed; comparisons use **strict** inequality on \(|\cdot|\) only. Versus the table, only a **strictly larger** amplitude replaces the incumbent; exact ties between winner and incumbent leave the incumbent unchanged. DIB does not enter ordering.
 
-## Hashing Function Definition
+## Position routing (permutation + modulo)
 
-The mapping for an input index $i \in \{0, \dots, n-1\}$ into a container of capacity $C$ is defined by a quotient-mixed hash:
-$$ h(i) = \left( \text{round}\left( \lfloor i / C \rfloor \cdot \frac{n}{C} \right) + i \right) \pmod C $$
+Routing does **not** use a closed-form mixed hash on the raw index. Instead:
 
-It is heavily advised that $n$ be perfectly divisible by $C$ ($n \pmod C = 0$). This guarantees that all $C$ buckets receive the exact same number of source tokens per sequence ($stride = n/C$), making the expected magnitude identically distributed instead of starving trailing buckets.
+1. **Seeded permutation:** build a uniform random permutation `perm` of $\{0,\ldots,n-1\}$ with `torch.randperm(n)` and a fixed generator seed (the pooling API exposes `seed`; default matches the Python/Triton reference). The incoming vector is **gathered** along the sequence axis: destination position $j$ reads source index `perm[j]` (`output[j] = input[perm[j]]`). Thus original index $i$ lands at permuted linear index $k$ satisfying `perm[k]=i`.
+2. **Grid reshape:** treat the permuted sequence as a dense matrix of shape $(\textit{stride}, C)$ with $\textit{stride}=n/C$.
+3. **Initial bucket:** column $c \in \{0,\ldots,C-1\}$ is bucket $c$. For permuted linear index $k$, the pipeline column is
+   $$ c = k \bmod C,\qquad r = \lfloor k / C \rfloor \in \{0,\ldots,\textit{stride}-1\} $$
+   so each bucket receives exactly $\textit{stride}$ competing slots (one per row).
 
-This formula intrinsically defines a uniform Torus-like topology framing across blocks where every $C$-length subgroup is shifted symmetrically by approximately $stride$. This structural regularity is extremely beneficial when paired with the Decoder's Transformer backbone and Relative Positional Encodings (RoPE), as the attention layers can natively leverage these translational equivariant offsets.
+It is heavily advised that $n$ be perfectly divisible by $C$ ($n \pmod C = 0$). Then every bucket has the same pipeline depth $\textit{stride}=n/C$, which balances load across buckets for the decoder’s Transformer over the bucket axis (RoPE).
 
-## Exact Parallel RH Operator
+The permutation intentionally **breaks trivial locality** in raw index order while keeping the regular $(\textit{stride}, C)$ geometry the scatter–swap dynamics rely on.
 
-Implemented as a Triton kernel acting on the persistent memory table.
+## Operator overview
 
-### Initialization & Constraints
+Implemented as a Triton kernel (and Python reference) on a persistent table.
+
+### Initialization & constraints
 
 - Let $stride = n // C$.
-- The GPU table is initialized with: $values=0.0$, $dib=0$, $\gamma=0.0$.
-- Time decay is explicitly decoupled. The persistent table must be decayed via a separate `advance_time` step prior to executing this spatial pooling loop.
+- The GPU table is initialized with: $values=0.0$, $dib=0$, and `carry_id` (integral), often a sentinel such as $-1$ until real payloads are written. Comparison vs incumbents uses **absolute amplitude** of stored values only—there is **no** separate “empty slot” amplitude sent like $-1$ for the table.
+- (Time-decay of the table is not part of the current Python/Triton path; a future design can `gather` per-source factors from `carry_id` if needed.)
 
-### Parallel Scatter-Swap & Virtual DIB Tracking
+### Scatter-swap & virtual DIB tracking
 
-Unlike approximate pooling that discards displaced elements, this exact parallel operator ensures no elements are unfairly dropped during collisions by utilizing two core mechanisms:
+Unlike pooling that discards displaced elements, this operator keeps displaced incumbents in play:
 
-1. **Scatter-Swap**: When a collision occurs and an incoming element displaces an incumbent, the incumbent is *scattered* back into the probing pipeline slot vacated by the winner. It seamlessly continues probing the next buckets.
-2. **Virtual DIB Tracker**: To avoid repeatedly updating DIB values in the tracking pipeline, DIB is tracked via an algebraic offset: `base_dib_offset = table_dib - step`. For any displaced element, its effective DIB during subsequent probe steps is evaluated as `Effective DIB = (step + 1) + base_dib_offset = table_dib + 1`.
+1. **Scatter-swap**: When an incoming element wins a bucket, the displaced incumbent is written back into the probing pipeline slot the winner vacated.
+2. **Virtual DIB tracker**: DIB is tracked via an algebraic offset (`base_dib_offset = table_dib - step`) so effective DIB composes correctly across steps without mutating every cell each iteration.
 
-### Compute Loop (Semantics)
+### Compute loop (semantics)
 
-1. Reshape the input length `n` vector into matrix representations of size `[stride, C]`.
+1. Reshape the length-`n` vector into `[stride, C]` (after the fixed permutation).
 2. Initialize the `base_dib_offset` pipeline tensor to zeros.
-3. Over $k$ max iterations (where $k$ is empirically chosen to capture $>99\%$ of settlements):
-   a. Compute the `Effective DIB` for all elements currently in the pipeline.
-   b. Extract the max elements across the `stride` dimension targeting each bucket `c`, prioritized first by absolute magnitude, then by `Effective DIB` as a tie-breaker.
-   c. Compare the winning pipeline elements against the current table incumbents at bucket `c` (again using magnitude, then DIB).
-   d. For any pipeline element that wins:
-      - Write its `values`, `gamma`, and `Effective DIB` to the table at bucket `c`.
-      - Gather the displaced incumbent's `values`, `gamma`, and `dib`.
-      - Compute the incumbent's `base_dib_offset = dib - step`.
-      - Scatter these displaced attributes back into the pipeline slot that the winner vacated.
-   e. Zero out any pipeline elements that successfully wrote and did *not* displace an incumbent (or drop losers that couldn't beat the table natively, although this implies they either lacked magnitude or DIB).
-   f. Roll the pipeline row by 1 step to simulate the next linear probe for the remaining/displaced elements.
+3. Over $k$ iterations (chosen empirically):
+   a. Compute effective DIB for pipeline cells.
+   b. Per bucket $c$, reduce over `stride` to select a winner by \(|\cdot|\) (strict `>` vs the table). **Zero** values participate like any other (\(|0|=0\)); they are not masked out of the reduction.
+   c. Replace a table slot only if the winner has **strictly larger** \(|\cdot|\) than the incumbent.
+   d. On update: write `values`, `carry_id`, effective DIB; scatter displaced incumbent back; roll the pipeline along $C$.
+
+There is **no** strict guarantee that the globally top-$C$ amplitudes occupy the table after finite $k$; increase $k$ or adjust data sparsity as needed.

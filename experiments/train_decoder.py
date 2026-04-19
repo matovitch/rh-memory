@@ -11,12 +11,24 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from rh_memory.decoder import RHDecoder, RHLoss
-from rh_memory._cpu_ops import cpu_rh_write_batched
-from rh_memory._python_ops import python_exact_parallel_rh
-from rh_memory._triton_ops import triton_exact_parallel_rh
+from rh_memory._python_ops import python_linear_probing_amplitude_pooling
+from rh_memory._triton_ops import triton_linear_probing_amplitude_pooling
 
 class SyntheticRHDataset(IterableDataset):
-    def __init__(self, n, C, chunk_size=128, num_samples=None, fast_k=5, seed=42, device="cpu"):
+    def __init__(
+        self,
+        n,
+        C,
+        chunk_size=128,
+        num_samples=None,
+        fast_k=5,
+        seed=42,
+        device="cpu",
+        *,
+        harmonic_decay: float = 0.65,
+        harmonic_amp_threshold: float = 0.1,
+        max_harmonics: int = 64,
+    ):
         super().__init__()
         self.n = n
         self.C_options = [C] if isinstance(C, int) else list(C)
@@ -25,7 +37,10 @@ class SyntheticRHDataset(IterableDataset):
         self.fast_k = fast_k
         self.seed = seed
         self.device = device
-        
+        self.harmonic_decay = harmonic_decay
+        self.harmonic_amp_threshold = harmonic_amp_threshold
+        self.max_harmonics = max_harmonics
+
     def __iter__(self):
         import random
         n = self.n
@@ -37,86 +52,104 @@ class SyntheticRHDataset(IterableDataset):
             C = random.choice(self.C_options)
             k_eff = int(self.fast_k * math.log(C))
             
-            # Create base sine waves (B, n) with random frequencies and phases
-            t = torch.linspace(0, 1, n, device=device).unsqueeze(0).expand(chunk_size, n)
-            
-            num_peaks = random.randint(2, 5)
-            sum_peaks = 0
-            for _ in range(num_peaks):
-                a = torch.empty(chunk_size, 1, device=device).uniform_(0.0, 1.0)
-                b = torch.empty(chunk_size, 1, device=device).uniform_(3.0, 5.0)
-                mag_env = torch.empty(chunk_size, 1, device=device).uniform_(-1.0, 1.0)
-                sum_peaks = sum_peaks + (1 - (t - a).abs()).pow(b.exp()) * mag_env
-                
-            signs = torch.empty(chunk_size, n, device=device).uniform_(0.0, 1.0).round() * 2 - 1
+            # Pseudo-harmonic peaks: see doc_llm/synthetic_harmonic_signals.md
+            t = torch.linspace(0.0, 1.0, n, device=device, dtype=torch.float32).unsqueeze(0).expand(
+                chunk_size, n
+            )
+            gamma = self.harmonic_decay
+            tau = self.harmonic_amp_threshold
+            max_h = self.max_harmonics
+
+            sum_peaks = torch.zeros(chunk_size, n, device=device, dtype=torch.float32)
+            k_h = 1
+            while k_h <= max_h:
+                # Random signed amplitude ~ N(0, (gamma^k)^2): stddev σ_k = gamma^k
+                sigma_k = gamma**k_h
+                if sigma_k < tau:
+                    break
+                z = torch.randn(chunk_size, 1, device=device, dtype=torch.float32)
+                alpha_k = z * sigma_k
+
+                a_k = torch.empty(chunk_size, 1, device=device, dtype=torch.float32).uniform_(1.0, 5.0)
+                phi_k = torch.empty(chunk_size, 1, device=device, dtype=torch.float32).uniform_(
+                    -math.pi, math.pi
+                )
+
+                angle = k_h * math.pi * t + phi_k
+                envelope_inner = (1.0 - torch.sin(angle).abs()).clamp(min=1e-8)
+                envelope = envelope_inner.pow(torch.exp(a_k))
+
+                sum_peaks += alpha_k * envelope
+                k_h += 1
+
+            signs = torch.empty(chunk_size, n, device=device, dtype=torch.float32).uniform_(0.0, 1.0).round() * 2 - 1
             raw_inputs = sum_peaks * signs
             
             # Start state bounds
             table_values = torch.zeros(chunk_size, C, dtype=torch.float32, device=device)
-            table_dib = torch.zeros(chunk_size, C, dtype=torch.long if device == "cpu" or str(device) == "cpu" else torch.int32, device=device)
-            # Use table_gamma (initialized to 0) to carry the source indices 
-            table_gamma = torch.zeros(chunk_size, C, dtype=torch.float32, device=device)
-            
-            # Fast pooling path uses triton kernel if on gpu
-            incoming_gammas = torch.arange(n, dtype=torch.float32, device=device).unsqueeze(0).expand(chunk_size, n)
-            
-            # Pad to multiple of C if necessary to satisfy exact_parallel_rh requirements
+            table_dib = torch.zeros(chunk_size, C, dtype=torch.int32, device=device)
+            # Integral carry_id: source index per slot (-1 = empty / padding)
+            table_carry_id = torch.full((chunk_size, C), -1, dtype=torch.int32, device=device)
+
+            incoming_carry_id = torch.arange(n, dtype=torch.int32, device=device).unsqueeze(0).expand(chunk_size, n)
+
+            # Pad to multiple of C if necessary for linear_probing_amplitude_pooling
             pad_len = (C - (n % C)) % C
-            padded_n = n + pad_len
-            
+
             if pad_len > 0:
                 raw_inputs_padded = torch.nn.functional.pad(raw_inputs, (0, pad_len), value=0.0)
-                incoming_gammas_padded = torch.nn.functional.pad(incoming_gammas, (0, pad_len), value=-1.0)
+                incoming_carry_id_padded = torch.nn.functional.pad(
+                    incoming_carry_id, (0, pad_len), value=-1
+                )
             else:
                 raw_inputs_padded = raw_inputs
-                incoming_gammas_padded = incoming_gammas
-            
+                incoming_carry_id_padded = incoming_carry_id
+
             if "cuda" in str(device):
-                out_values, out_dib, out_gamma = triton_exact_parallel_rh(
+                out_values, out_dib, out_carry_id = triton_linear_probing_amplitude_pooling(
                     table_values,
                     table_dib,
-                    table_gamma,
+                    table_carry_id,
                     raw_inputs_padded,
-                    incoming_gammas_padded,
+                    incoming_carry_id_padded,
                     k=k_eff,
                     seed=self.seed,
                 )
             else:
-                out_values, out_dib, out_gamma = python_exact_parallel_rh(
+                out_values, out_dib, out_carry_id = python_linear_probing_amplitude_pooling(
                     table_values,
                     table_dib,
-                    table_gamma,
+                    table_carry_id,
                     raw_inputs_padded,
-                    incoming_gammas_padded,
+                    incoming_carry_id_padded,
                     k=k_eff,
                     seed=self.seed,
                 )
-            
-            out_indices = out_gamma.long()
+
+            out_indices = out_carry_id.long()
             
             # Mask out invalid indices from padding
             valid_mask = (out_indices >= 0) & (out_indices < n)
             out_indices = torch.clamp(out_indices, 0, n - 1)
             
-            # Restore the all-ones gamma for the neural network tokens to match original behavior
-            decoder_gamma = torch.ones_like(out_gamma)
-            tokens_3d = torch.stack([out_values, decoder_gamma, out_dib.float()], dim=-1)
+            # Decoder sees value + dib only; gamma stays in RH for supervision (out_indices / targets).
+            bucket_tokens = torch.stack([out_values, out_dib.float()], dim=-1)
             
             targets = torch.zeros(chunk_size, C, n, dtype=torch.float32, device=device)
             # Only scatter valid indices
             targets.scatter_(2, out_indices.unsqueeze(2), valid_mask.unsqueeze(2).float())
-            magnitudes = out_values.abs() * valid_mask.float()
+            abs_amplitude = out_values.abs() * valid_mask.float()
             
             if self.num_samples is None:
-                yield tokens_3d, targets, magnitudes, out_indices
+                yield bucket_tokens, targets, abs_amplitude, out_indices
                 samples_generated += chunk_size
             else:
                 remaining = self.num_samples - samples_generated
                 if remaining > 0:
                     if remaining < chunk_size:
-                        yield tokens_3d[:remaining], targets[:remaining], magnitudes[:remaining], out_indices[:remaining]
+                        yield bucket_tokens[:remaining], targets[:remaining], abs_amplitude[:remaining], out_indices[:remaining]
                     else:
-                        yield tokens_3d, targets, magnitudes, out_indices
+                        yield bucket_tokens, targets, abs_amplitude, out_indices
                     samples_generated += min(remaining, chunk_size)
 
 
@@ -147,7 +180,7 @@ def main():
     
     # Hyperparameters
     d_model = 256
-    total_steps = 20_000_000 // B
+    total_steps = 10_000_000 // B
     eval_every_steps = 50_000 // B
     learning_rate = 2e-4
     
@@ -170,6 +203,7 @@ def main():
     checkpoint_path = Path("experiments/checkpoint.pt")
     if checkpoint_path.exists():
         print(f"Loading checkpoint from {checkpoint_path}...")
+        # Checkpoints trained with Linear(3, d_model) are incompatible with the 2-channel decoder.
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         decoder.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -188,24 +222,24 @@ def main():
         if step > total_steps:
             break
             
-        batch_tokens     = batch[0].to(device)
-        batch_targets    = batch[1].to(device)
-        batch_magnitudes = batch[2].to(device)
-        batch_indices    = batch[3].to(device)
+        batch_tokens        = batch[0].to(device)
+        batch_targets       = batch[1].to(device)
+        batch_abs_amplitude = batch[2].to(device)
+        batch_indices       = batch[3].to(device)
         
         optimizer.zero_grad()
         
         # Forward & Backward
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             logits = decoder(batch_tokens)
-            loss = criterion(logits, batch_targets, batch_magnitudes)
+            loss = criterion(logits, batch_targets, batch_abs_amplitude)
         
         loss.backward()
         optimizer.step()
         
         # Accuracy metric
         _, predicted_indices = torch.max(logits, dim=2)
-        active_mask = batch_magnitudes > 0.01
+        active_mask = batch_abs_amplitude > 0.01
         correct = (predicted_indices == batch_indices) & active_mask
         
         total_active = active_mask.sum().item()
@@ -229,15 +263,15 @@ def main():
                 for test_batch in test_loader:
                     b_toks = test_batch[0].to(device)
                     b_targs = test_batch[1].to(device)
-                    b_mags = test_batch[2].to(device)
+                    b_abs_amp = test_batch[2].to(device)
                     b_idx = test_batch[3].to(device)
                     
                     with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                         logits = decoder(b_toks)
-                        loss = criterion(logits, b_targs, b_mags)
+                        loss = criterion(logits, b_targs, b_abs_amp)
                     
                     _, pred_idx = torch.max(logits, dim=2)
-                    act_mask = b_mags > 0.01
+                    act_mask = b_abs_amp > 0.01
                     correct = (pred_idx == b_idx) & act_mask
                     
                     tot_active = act_mask.sum().item()
@@ -278,12 +312,12 @@ def main():
     
     all_test_logits = []
     all_test_indices = []
-    all_test_mags = []
+    all_test_abs_amp = []
     
     with torch.no_grad():
         for test_batch in test_loader:
             b_toks = test_batch[0].to(device)
-            b_mags = test_batch[2].to(device)
+            b_abs_amp = test_batch[2].to(device)
             b_idx = test_batch[3].to(device)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 logits = decoder(b_toks) # [B, C, n]
@@ -293,17 +327,17 @@ def main():
             n_seq_batch = logits.shape[-1]
             all_test_logits.append(logits.float().cpu().view(-1, n_seq_batch))
             all_test_indices.append(b_idx.cpu().view(-1))
-            all_test_mags.append(b_mags.cpu().view(-1))
+            all_test_abs_amp.append(b_abs_amp.cpu().view(-1))
             
     # Concatenate flattened outputs
     all_logits_flat = torch.cat(all_test_logits, dim=0)       # [Total_B * C, n]
     all_indices_flat = torch.cat(all_test_indices, dim=0)     # [Total_B * C]
-    all_mags_flat = torch.cat(all_test_mags, dim=0)           # [Total_B * C]
+    all_abs_amp_flat = torch.cat(all_test_abs_amp, dim=0)           # [Total_B * C]
     
     n_seq = all_logits_flat.shape[-1]
     
     # Filter out empty buckets
-    active_mask = all_mags_flat > 0.01
+    active_mask = all_abs_amp_flat > 0.01
     active_logits = all_logits_flat[active_mask]              # [Num_Active, n]
     active_indices = all_indices_flat[active_mask].long()     # [Num_Active]
     

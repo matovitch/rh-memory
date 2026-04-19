@@ -1,46 +1,57 @@
-# RH-Memory: Pooling Operators
+# Linear-probing-based amplitude pooling (LPAP)
 
-This document defines **linear-probing-based amplitude pooling**: mapping a length-`[n]` vector of signed samples into `[C]` table buckets via an open-addressing, scatter-swap dynamics (Python: `python_linear_probing_amplitude_pooling`; GPU: `triton_linear_probing_amplitude_pooling`). Both implementations require **``torch.float32``** ``table_values`` / ``incoming_values`` and **``torch.int32``** ``table_dib``, ``table_carry_id``, and ``incoming_carry_id``. The **Python** reference updates **table** state in place; **incoming** tensors are only **read** (permuted pipeline in gather buffers). **Triton** shares that gather and may stage **table** tensors to contiguous buffers when convenient, run the kernel (stride-axis **vectorized max** on absolute amplitude, strict compare vs ``|table|``), then copy back—**ownership is an optimization hint**, not a mandate to mutate every buffer in place. **Amplitude** here means the signal can be signed; comparisons use **strict** inequality on \(|\cdot|\) only. Versus the table, only a **strictly larger** amplitude replaces the incumbent; exact ties between winner and incumbent leave the incumbent unchanged. DIB does not enter ordering.
+This document specifies **tensor semantics**, **routing geometry**, and **algorithm design** for mapping a length-`[n]` vector of signed samples into `[C]` table buckets via open-addressing **scatter–swap** dynamics.
+
+**Implementations:** Python reference **`python_linear_probing_amplitude_pooling`** (`src/rh_memory/_python_ops.py`, table updated in place when possible) and GPU **`triton_linear_probing_amplitude_pooling`** (`src/rh_memory/_triton_ops.py`). Both require **`torch.float32`** for `table_values` / `incoming_values` and **`torch.int32`** for `table_dib`, `table_carry_id`, and `incoming_carry_id`. The Python path applies the permuted pipeline in gather buffers and updates the **table** in place; **incoming** tensors are read-only. Triton may stage table tensors to contiguous buffers, run the kernel (stride-axis **vectorized max** on absolute amplitude, strict compare vs `|table|`), then copy back—**ownership is an optimization hint**, not a mandate to mutate every buffer in place.
+
+**Amplitude** means the signal can be **signed**; all **ordering** uses **strict** inequality on \(|\cdot|\) only. Versus the table, only a **strictly larger** amplitude replaces the incumbent; exact ties leave the incumbent. **DIB** does not decide ordering.
+
+---
 
 ## Position routing (permutation + modulo)
 
-Routing does **not** use a closed-form mixed hash on the raw index. Instead:
+Routing does **not** use a closed-form mixed hash on the raw index.
 
-1. **Seeded permutation:** build a uniform random permutation `perm` of $\{0,\ldots,n-1\}$ with `torch.randperm(n)` and a fixed generator seed (the pooling API exposes `seed`; default matches the Python/Triton reference). The incoming vector is **gathered** along the sequence axis: destination position $j$ reads source index `perm[j]` (`output[j] = input[perm[j]]`). Thus original index $i$ lands at permuted linear index $k$ satisfying `perm[k]=i`.
-2. **Grid reshape:** treat the permuted sequence as a dense matrix of shape $(\textit{stride}, C)$ with $\textit{stride}=n/C$.
-3. **Initial bucket:** column $c \in \{0,\ldots,C-1\}$ is bucket $c$. For permuted linear index $k$, the pipeline column is
-   $$ c = k \bmod C,\qquad r = \lfloor k / C \rfloor \in \{0,\ldots,\textit{stride}-1\} $$
-   so each bucket receives exactly $\textit{stride}$ competing slots (one per row).
+1. **Seeded permutation:** build a uniform random permutation `perm` of \(\{0,\ldots,n-1\}\) with `torch.randperm(n)` and a fixed generator seed (the pooling API exposes `seed`; default matches the Python/Triton reference). The incoming vector is **gathered** along the sequence axis: destination position \(j\) reads source index `perm[j]` (`output[j] = input[perm[j]]`). Thus source index \(i\) sits at permuted linear index \(k\) with `perm[k]=i`.
+2. **Grid reshape:** treat the permuted sequence as a dense matrix of shape \((\textit{stride}, C)\) with \(\textit{stride}=n/C\) (when \(n\) is divisible by \(C\)).
+3. **Initial bucket:** column \(c \in \{0,\ldots,C-1\}\). For permuted linear index \(k\), pipeline column \(c = k \bmod C\) and row \(r = \lfloor k / C \rfloor\).
 
-It is heavily advised that $n$ be perfectly divisible by $C$ ($n \pmod C = 0$). Then every bucket has the same pipeline depth $\textit{stride}=n/C$, which balances load across buckets for the decoder’s Transformer over the bucket axis (RoPE).
+Prefer \(n\) divisible by \(C\) so each bucket has equal pipeline depth \(\textit{stride}=n/C\)—this balances load for decoders that use RoPE over the bucket axis.
 
-The permutation intentionally **breaks trivial locality** in raw index order while keeping the regular $(\textit{stride}, C)$ geometry the scatter–swap dynamics rely on.
+The permutation **breaks trivial locality** in raw index order while preserving the regular \((\textit{stride}, C)\) geometry scatter–swap relies on.
 
-## Operator overview
+---
 
-Implemented as a Triton kernel (and Python reference) on a persistent table.
+## Scatter–swap dynamics and virtual DIB
 
-### Initialization & constraints
+Unlike pooling that drops displaced entries on collision, LPAP **keeps** displaced incumbents in play:
 
-- Let $stride = n // C$.
-- The GPU table is initialized with: $values=0.0$, $dib=0$, and `carry_id` (integral), often a sentinel such as $-1$ until real payloads are written. Comparison vs incumbents uses **absolute amplitude** of stored values only—there is **no** separate “empty slot” amplitude sent like $-1$ for the table.
-- (Time-decay of the table is not part of the current Python/Triton path; a future design can `gather` per-source factors from `carry_id` if needed.)
+1. **Scatter-swap:** When an incoming element wins a bucket, the displaced incumbent is written back into the **pipeline slot the winner vacated**, then the pipeline **rolls** along \(C\) so probing continues like sequential open addressing.
+2. **Virtual DIB tracker:** Effective DIB is tracked via an algebraic offset (`base_dib_offset`) so displacement composes across steps without mutating every pipeline cell each iteration.
 
-### Scatter-swap & virtual DIB tracking
+### Conveyor belt intuition
 
-Unlike pooling that discards displaced elements, this operator keeps displaced incumbents in play:
+The incoming tensor is viewed as `[stride, C]` after permutation. Each step: per bucket \(c\), pick the pipeline row winner by \(|\cdot|\) over `stride`; **ties** among pipeline maxima resolve by **scan order** (first maximal row wins). **Vs table:** replace incumbent only on **strictly larger** \(|\cdot|\); ties keep the table. **Zeros** participate (\(|0|=0\)); there is no separate “inactive” mask for amplitude.
 
-1. **Scatter-swap**: When an incoming element wins a bucket, the displaced incumbent is written back into the probing pipeline slot the winner vacated.
-2. **Virtual DIB tracker**: DIB is tracked via an algebraic offset (`base_dib_offset = table_dib - step`) so effective DIB composes correctly across steps without mutating every cell each iteration.
+There is **no guarantee** that the globally largest amplitudes all occupy the table after finite \(k\); tune \(k\) empirically vs cost (e.g. relative to \(\log C\) in experiments).
 
-### Compute loop (semantics)
+---
 
-1. Reshape the length-`n` vector into `[stride, C]` (after the fixed permutation).
-2. Initialize the `base_dib_offset` pipeline tensor to zeros.
-3. Over $k$ iterations (chosen empirically):
-   a. Compute effective DIB for pipeline cells.
-   b. Per bucket $c$, reduce over `stride` to select a winner by \(|\cdot|\) (strict `>` vs the table). **Zero** values participate like any other (\(|0|=0\)); they are not masked out of the reduction.
-   c. Replace a table slot only if the winner has **strictly larger** \(|\cdot|\) than the incumbent.
-   d. On update: write `values`, `carry_id`, effective DIB; scatter displaced incumbent back; roll the pipeline along $C$.
+## Operator compute loop (semantics)
 
-There is **no** strict guarantee that the globally top-$C$ amplitudes occupy the table after finite $k$; increase $k$ or adjust data sparsity as needed.
+Implemented as an outer loop over \(k\) iterations:
+
+1. Reshape the permuted length-\(n\) vector to `[stride, C]`.
+2. Initialize pipeline `base_dib_offset` to zeros.
+3. Repeat \(k\) times:
+   - Effective DIB for pipeline cells combines offsets with the step index.
+   - Per bucket \(c\), reduce over `stride` to select a winner by \(|\cdot|\) (strict `>` vs the table for updates).
+   - On update: write `values`, `carry_id`, effective DIB; scatter displaced incumbent back; **roll** the pipeline along \(C\).
+
+Finite \(k\) does not strictly guarantee the global top-\(C\) amplitudes fill the table—increase \(k\) or adjust sparsity as needed.
+
+---
+
+## Python vs Triton
+
+Semantics are aligned: same permutation gather, same strict-\(|\cdot|\) rules, same scatter–swap and roll. Triton parallelizes over batch (and may vectorize along `stride`); choose either path for correctness checks (`tests/test_batched_rh.py` parity).

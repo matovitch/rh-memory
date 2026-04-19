@@ -9,8 +9,10 @@ version = "0.1.0"
 cuda = "12.0"
 
 [tasks]
+# Usage: extra CLI args go after `--`, e.g. `pixi run test -- tests/test_decoder.py -q`
 test = "python -m pytest"
-bench-linear-probing-amplitude-pooling = "python benchmarks/bench_linear_probing_amplitude_pooling.py"
+train-surrogate = "python experiments/train_surrogate.py"
+train-decoder-surrogate = "python experiments/train_decoder_surrogate.py"
 
 [dependencies]
 python = ">=3.14.4,<3.15"

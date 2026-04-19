@@ -1,6 +1,6 @@
 # Synthetic harmonic training signals
 
-This document records the **pseudo-harmonic peak generator** used for decoder training data (implemented in **`experiments/train_decoder.py`** as `SyntheticRHDataset`). Treating the normalized index \(x\) as living on a **circle** (periodic boundary) matches torus-like routing intuition and avoids privileging endpoints.
+This document records the **pseudo-harmonic peak generator** used for surrogate / decoder synthetic experiments (**`harmonic_raw_batch`** in **`experiments/synthetic_lpap_pipeline.py`**, shared by **`train_surrogate.py`** and **`train_decoder_surrogate.py`**). Treating the normalized index \(x\) as living on a **circle** (periodic boundary) matches torus-like routing intuition and avoids privileging endpoints.
 
 ## Signal definition
 
@@ -26,7 +26,7 @@ $$
 ## Implementation
 
 - **Chunk-wise** generation: `t = \texttt{linspace}(0,1,n)` expanded to `(chunk_size, n)`; for each harmonic, accumulate `alpha_k * envelope` in **float32**; then **per-position sign flips** (as in the current script) for additional variety.
-- **Reference code path:** `SyntheticRHDataset` in **`experiments/train_decoder.py`**.
+- **Reference code path:** **`harmonic_raw_batch`** in **`experiments/synthetic_lpap_pipeline.py`**.
 
 ## Toward joint surrogate + decoder pretraining
 

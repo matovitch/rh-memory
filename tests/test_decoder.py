@@ -3,7 +3,7 @@ import sys; from pathlib import Path; sys.path.insert(0, str(Path(__file__).reso
 import pytest
 import torch
 import torch.nn as nn
-from rh_memory.decoder import RHDecoder, RHLoss
+from rh_memory.decoder import RHDecoder, RHDecoderLoss
 
 @pytest.fixture
 def dummy_data():
@@ -66,13 +66,12 @@ def test_decoder_reconstruction(dummy_data):
     assert reconstructed.shape == (dummy_data['batch_size'], dummy_data['n']), \
         f"Expected reconstructed shape {(dummy_data['batch_size'], dummy_data['n'])}, but got {reconstructed.shape}"
 
-def test_rh_loss(dummy_data):
-    loss_fn = RHLoss()
-    logits = torch.randn(dummy_data['batch_size'], dummy_data['C'], dummy_data['n'])
-    
-    # Calculate loss
-    loss = loss_fn(logits, dummy_data['targets'], dummy_data['abs_amplitude'])
-    
+def test_rh_decoder_loss(dummy_data):
+    loss_fn = RHDecoderLoss()
+    logits = torch.randn(dummy_data["batch_size"], dummy_data["C"], dummy_data["n"])
+
+    loss = loss_fn(logits, dummy_data["targets"], dummy_data["abs_amplitude"])
+
     assert loss.dim() == 0, "Loss should be a scalar"
     assert not torch.isnan(loss), "Loss should not be NaN"
     assert loss.item() > 0, "Loss should be positive"

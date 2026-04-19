@@ -4,7 +4,7 @@ This document records a **coherent research plan** from the existing **linear-pr
 
 **Primary plan for gradients:** replace the discrete pooler with a **differentiable surrogate** (e.g. a **transformer** over buckets, analogous in role to the decoder), and **anchor** it to the real operator with a **regularization / distillation loss** against **discrete pooler** outputs. A **fully relaxed “soft pooler”** (softmax winners, soft scatter) remains an **alternative** if you want algorithmic fidelity without a learned middle layer.
 
-Related notes: [philosophy.md](philosophy.md) (motivation and surrogate-first stance), [decoder.md](decoder.md), [linear_probing_amplitude_pooling.md](linear_probing_amplitude_pooling.md), [gaussian_information_bottleneck.md](gaussian_information_bottleneck.md).
+Related notes: [philosophy.md](philosophy.md) (motivation and surrogate-first stance), [decoder.md](decoder.md), [pooling.md](pooling.md) (LPAP semantics and implementations).
 
 ---
 
@@ -17,7 +17,7 @@ Related notes: [philosophy.md](philosophy.md) (motivation and surrogate-first st
 - **Dynamics:** for `k` rounds, each round **selects a winner per bucket** (**strict** \(|\cdot|\) only—pipeline scan order resolves exact ties among equals; vs table **strict** \(|\cdot|\), incumbent on tie), **updates** the table, **writes displaced mass back** into the pipeline (scatter-swap), then **rolls** along the bucket axis so mass moves between buckets.
 - **Output:** table values and metadata (e.g. DIB, carried source indices) of shape `[C]` per batch row.
 
-The **reference implementation** is **discrete**: hard maxima, hard masks, hard scatter indices. See [linear_probing_amplitude_pooling.md](linear_probing_amplitude_pooling.md) and the Python baseline in the codebase.
+The **reference implementation** is **discrete**: hard maxima, hard masks, hard scatter indices. See [pooling.md](pooling.md) and the Python baseline in the codebase.
 
 ### 1.2 Decoder
 
@@ -103,7 +103,7 @@ Avoid **pooling** from \(n\) tokens down to \(C\) bucket summaries by supervisin
 
 - **Same numel** as `[B, C, n]` (swap axes).
 - **Per-position** logits need **\(n\)** transformer tokens (one per flattened index); **no** aggregation step from sequence length \(n\) to \(C\) in the head.
-- **Weighted BCE** (same spirit as `RHLoss`): weight **per position** (e.g. by **absolute amplitude** \(|x_i|\) or masks from the **discrete pooler**). **Loser** rows stay all-zero targets.
+- **Weighted BCE** (same spirit as `RHSurrogateLoss` / `RHDecoderLoss`): weight **per position** (e.g. by **absolute amplitude** \(|x_i|\) or masks from the **discrete pooler**). **Loser** rows stay all-zero targets.
 
 **Consistency:** targets come from \(\mathrm{LPAP}\) (**linear-probing-based amplitude pooling**): each **winning** source index maps to **one** bucket (injectivity of “winner position → bucket” in the usual case). If two buckets ever shared the same **carry_id** in edge cases, clarify target construction or use multi-label BCE for that row.
 
@@ -165,10 +165,10 @@ If you prefer **algorithmic** relaxation instead of a learned \(g_\phi\): replac
 ## 8. Losses (first iteration)
 
 - **Downstream:** **Image reconstruction** — L2 (MSE) on `32×32` after reshaping logits or a dedicated image head; optionally **SSIM** or **perceptual** (LPIPS-style) loss.
-- **Surrogate anchor:** **Weighted BCE** on **`[B, n, C]`** dual logits vs LPAP-derived targets (same **spirit** as decoder `RHLoss` on **`[B, C, n]`**).
+- **Surrogate anchor:** **Weighted BCE** on **`[B, n, C]`** logits vs LPAP-derived targets (same **spirit** as **`RHDecoderLoss`** on **`[B, C, n]`**).
 - **Optional:** small terms for **peakiness** / **sparsity** if the flow collapses to flat fields (e.g. L1 or **TV on \(|\mathbf{x}|\)** for alignment with absolute-amplitude salience); auxiliary MSE on predicted **table values** if you add such a head.
 
-**MI / IB:** out of scope for v1; see [gaussian_information_bottleneck.md](gaussian_information_bottleneck.md).
+**MI / IB:** out of scope for v1.
 
 ---
 

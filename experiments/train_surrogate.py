@@ -137,17 +137,33 @@ def worker_init_fn(worker_id):
     torch.manual_seed(worker_seed)
 
 
+def bucket_attribution_accuracy_percent(logits: torch.Tensor, targets: torch.Tensor) -> float:
+    """
+    Percent of positions where predicted bucket matches the one-hot teacher bucket.
+
+    Rows without a teacher assignment (all-zero targets) are ignored.
+    """
+    pred_bucket = logits.argmax(dim=2)
+    true_bucket = targets.argmax(dim=2)
+    has_teacher = targets.sum(dim=2) > 0
+    denom = has_teacher.sum().item()
+    if denom == 0:
+        return 0.0
+    correct = ((pred_bucket == true_bucket) & has_teacher).sum().item()
+    return correct / denom * 100.0
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Train RHSurrogate on synthetic harmonic + LPAP teacher.")
     p.add_argument("--n", type=int, default=1024)
     p.add_argument("--C", type=int, default=128)
-    p.add_argument("--batch-size", type=int, default=128)
-    p.add_argument("--d-model", type=int, default=256)
-    p.add_argument("--n-heads", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--d-model", type=int, default=128)
+    p.add_argument("--n-heads", type=int, default=4)
     p.add_argument("--num-layers", type=int, default=4)
     p.add_argument("--ff-mult", type=int, default=4)
     p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--total-steps", type=int, default=15_000_000 // 128)
+    p.add_argument("--total-steps", type=int, default=15_000_000 // 32)
     p.add_argument("--eval-every", type=int, default=50_000 // 128)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--fast-k", type=float, default=5.0)
@@ -242,6 +258,7 @@ def main():
 
     model.train()
     running_loss = 0.0
+    running_acc = 0.0
     batches_since_eval = 0
 
     for step_idx, batch in enumerate(train_loader, 1):
@@ -263,13 +280,17 @@ def main():
         loss.backward()
         optimizer.step()
 
+        train_acc = bucket_attribution_accuracy_percent(logits, targets)
         running_loss += loss.item()
+        running_acc += train_acc
         batches_since_eval += 1
 
         if step % args.eval_every == 0 or step == 1:
             avg_train = running_loss / batches_since_eval
+            avg_train_acc = running_acc / batches_since_eval
             model.eval()
             test_loss = 0.0
+            test_acc = 0.0
             test_batches = 0
             with torch.no_grad():
                 for tb in test_loader:
@@ -280,9 +301,14 @@ def main():
                     lt = lf[:, :, :C]
                     tt = tg[:, :, :C]
                     test_loss += criterion(lt, tt, w).item()
+                    test_acc += bucket_attribution_accuracy_percent(lt, tt)
                     test_batches += 1
             avg_test = test_loss / max(test_batches, 1)
-            print(f"Step {step} | Train Loss: {avg_train:.6f} | Test Loss: {avg_test:.6f}")
+            avg_test_acc = test_acc / max(test_batches, 1)
+            print(
+                f"Step {step} | Train Loss: {avg_train:.6f} | Train Acc: {avg_train_acc:.2f}% | "
+                f"Test Loss: {avg_test:.6f} | Test Acc: {avg_test_acc:.2f}%"
+            )
 
             torch.save(
                 {
@@ -296,6 +322,7 @@ def main():
             print(f"Saved checkpoint to {args.checkpoint}")
 
             running_loss = 0.0
+            running_acc = 0.0
             batches_since_eval = 0
             model.train()
 

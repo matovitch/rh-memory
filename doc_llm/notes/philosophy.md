@@ -8,19 +8,23 @@ For executable contracts, use:
 - `doc_llm/spec/objectives.md`
 - `doc_llm/spec/pooling.md`
 
+Terminology used in notes:
+- **energy space**: input/output representation regime where magnitude and L2-energy interpretation are meaningful.
+- **compressed space**: LPAP bottleneck-side representation determined by `C` and routing dynamics.
+
 ## High-Level Framing
 
-- RH-memory can be viewed as an autoencoder-shaped stack with a structured bottleneck (`C` buckets) instead of a free latent vector.
+- RH-memory can be viewed as an autoencoder-shaped stack mapping through an energy space and a structured compressed space (`C` buckets), rather than relying on a single unconstrained latent abstraction.
 - LPAP competition over absolute amplitudes is the core bottleneck mechanism.
 - Surrogate-first training is a practical strategy to keep forward passes differentiable while staying anchored to LPAP behavior.
 
 ## Strategic Trajectory (Autoencoder First, Memory Next)
 
 - The current autoencoder stack is a first step, not the final architecture goal.
-- The immediate objective is to discover a useful latent geometry that can later be integrated into a neural memory design.
-- Peak-like harmonic signals act as a bootstrap latent prior; the latent space is expected to evolve under end-to-end task training plus regularizers.
+- The immediate objective is to discover a useful energy-space geometry that can later be integrated into a neural memory design.
+- Peak-like harmonic signals act as a bootstrap prior for that energy space; the representation is expected to evolve under end-to-end task training plus regularizers.
 - An LPAP-alignment regularizer is intended to keep surrogate behavior close to the operator semantics as training evolves.
-- An L2 reconstruction anchor keeps the autoencoder stack grounded while the latent representation adapts to downstream tasks.
+- An L2 reconstruction anchor keeps the autoencoder stack grounded while the energy-space representation adapts to downstream tasks.
 
 ## Design Intuition (Not Guarantees)
 

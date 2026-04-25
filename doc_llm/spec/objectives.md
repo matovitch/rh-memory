@@ -62,7 +62,7 @@ Input:
   - selected decoder logit (confidence)
 
 Target:
-- `raw_inputs` `[B, n]` (unpermuted harmonic frame).
+- `raw_inputs` `[B, n]` (current pipeline target in unpermuted sequence space).
 
 Loss:
 - `RHReconstructorLoss` (`MSELoss`) over `[B, n]`.

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader
 
 _EXP = Path(__file__).resolve().parent
 sys.path.insert(0, str(_EXP))
@@ -17,139 +16,29 @@ sys.path.insert(0, str(_EXP.parent / "src"))
 
 from rh_memory.surrogate import RHSurrogate, RHSurrogateLoss
 
-from synthetic_lpap_pipeline import (
-    gather_permuted_stream,
-    harmonic_raw_batch,
-    lpap_pool,
-    max_padded_length,
-    pad_for_lpap,
-    surrogate_teacher_one_hot,
+from pipeline import (
+    harmonic_stage,
+    iter_take,
+    surrogate_stage,
+    surrogate_training_adapter,
+    worker_init_fn,
 )
-
-from rh_memory._python_ops import _get_permutation
-
-
-class SurrogateSyntheticDataset(IterableDataset):
-    def __init__(
-        self,
-        n: int,
-        C: int,
-        chunk_size: int,
-        seed: int,
-        device: torch.device | str,
-        num_samples: int | None = None,
-        fast_k: float = 5.0,
-        harmonic_decay: float = 0.65,
-        harmonic_amp_threshold: float = 0.1,
-        max_harmonics: int = 64,
-    ):
-        super().__init__()
-        self.n = n
-        self.C = C
-        self.chunk_size = chunk_size
-        self.seed = seed
-        self.device = device
-        self.num_samples = num_samples
-        self.fast_k = fast_k
-        self.harmonic_decay = harmonic_decay
-        self.harmonic_amp_threshold = harmonic_amp_threshold
-        self.max_harmonics = max_harmonics
-
-    def __iter__(self):
-        n = self.n
-        C = self.C
-        chunk_size = self.chunk_size
-        samples_generated = 0
-        device = self.device
-
-        k_eff = int(self.fast_k * math.log(C))
-
-        while self.num_samples is None or samples_generated < self.num_samples:
-            raw_inputs = harmonic_raw_batch(
-                chunk_size,
-                n,
-                device,
-                self.harmonic_decay,
-                self.harmonic_amp_threshold,
-                self.max_harmonics,
-            )
-
-            incoming_carry_id = torch.arange(n, dtype=torch.int32, device=device).unsqueeze(0).expand(
-                chunk_size, n
-            )
-
-            raw_inputs_padded, incoming_carry_id_padded, n_pad = pad_for_lpap(raw_inputs, incoming_carry_id, C)
-
-            table_values = torch.zeros(chunk_size, C, dtype=torch.float32, device=device)
-            table_dib = torch.zeros(chunk_size, C, dtype=torch.int32, device=device)
-            table_carry_id = torch.full((chunk_size, C), -1, dtype=torch.int32, device=device)
-
-            _ov, _od, out_carry_id = lpap_pool(
-                table_values,
-                table_dib,
-                table_carry_id,
-                raw_inputs_padded,
-                incoming_carry_id_padded,
-                k_eff,
-                self.seed,
-                device,
-            )
-
-            perm_1d = _get_permutation(n_pad, self.seed, device)
-            x_perm, carry_perm = gather_permuted_stream(raw_inputs_padded, incoming_carry_id_padded, perm_1d)
-
-            position_tokens = x_perm.unsqueeze(-1)
-            targets_bnC = surrogate_teacher_one_hot(out_carry_id, perm_1d)
-
-            abs_amp = x_perm.abs()
-            valid_j = carry_perm >= 0
-            has_teacher = targets_bnC.sum(dim=2) > 0
-            weights = abs_amp * valid_j.float() * has_teacher.float()
-
-            batch = (
-                position_tokens,
-                targets_bnC,
-                weights,
-            )
-
-            if self.num_samples is None:
-                yield batch
-                samples_generated += chunk_size
-            else:
-                remaining = self.num_samples - samples_generated
-                if remaining <= 0:
-                    break
-                if remaining < chunk_size:
-                    take = remaining
-                    yield (
-                        batch[0][:take],
-                        batch[1][:take],
-                        batch[2][:take],
-                    )
-                    samples_generated += take
-                else:
-                    yield batch
-                    samples_generated += chunk_size
+from pipeline.utils import IterableFactoryDataset
 
 
-def worker_init_fn(worker_id):
-    worker_seed = torch.initial_seed() % 2**32
-    torch.manual_seed(worker_seed)
-
-
-def bucket_attribution_accuracy_percent(logits: torch.Tensor, targets: torch.Tensor) -> float:
+def bucket_slot_accuracy_percent(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """
-    Percent of positions where predicted bucket matches the one-hot teacher bucket.
+    Percent of buckets where predicted slot index j matches the one-hot teacher target.
 
     Rows without a teacher assignment (all-zero targets) are ignored.
     """
-    pred_bucket = logits.argmax(dim=2)
-    true_bucket = targets.argmax(dim=2)
+    pred_slot = logits.argmax(dim=2)
+    true_slot = targets.argmax(dim=2)
     has_teacher = targets.sum(dim=2) > 0
     denom = has_teacher.sum().item()
     if denom == 0:
         return 0.0
-    correct = ((pred_bucket == true_bucket) & has_teacher).sum().item()
+    correct = ((pred_slot == true_slot) & has_teacher).sum().item()
     return correct / denom * 100.0
 
 
@@ -158,12 +47,12 @@ def parse_args():
     p.add_argument("--n", type=int, default=1024)
     p.add_argument("--C", type=int, default=128)
     p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--d-model", type=int, default=128)
-    p.add_argument("--n-heads", type=int, default=4)
-    p.add_argument("--num-layers", type=int, default=4)
+    p.add_argument("--d-model", type=int, default=512)
+    p.add_argument("--n-heads", type=int, default=16)
+    p.add_argument("--num-layers", type=int, default=6)
     p.add_argument("--ff-mult", type=int, default=4)
     p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--total-steps", type=int, default=15_000_000 // 32)
+    p.add_argument("--total-steps", type=int, default=50_000_000 // 128)
     p.add_argument("--eval-every", type=int, default=50_000 // 128)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--fast-k", type=float, default=5.0)
@@ -179,31 +68,47 @@ def main():
 
     n = args.n
     C = args.C
-    seq_max = max_padded_length(n, C)
-    print(f"Dataset meta — n={n}, C={C}, max_padded_length={seq_max}")
+    if n % C != 0:
+        raise ValueError(f"Grouped permutation mode requires n % C == 0, got n={n}, C={C}")
+    seq_max = n
+    print(f"Dataset meta — n={n}, C={C}, sequence_length={seq_max}")
 
     B = args.batch_size
-    train_dataset = SurrogateSyntheticDataset(
-        n=n,
-        C=C,
-        chunk_size=B,
-        seed=args.seed,
-        device=device,
-        num_samples=None,
-        fast_k=args.fast_k,
-    )
-    test_num = min(1024, B * 8)
-    test_dataset = SurrogateSyntheticDataset(
-        n=n,
-        C=C,
-        chunk_size=B,
-        seed=args.seed,
-        device=device,
-        num_samples=test_num,
-        fast_k=args.fast_k,
-    )
+    def make_train_stream():
+        base = harmonic_stage(
+            n=n,
+            C=C,
+            chunk_size=B,
+            seed=args.seed,
+            device=device,
+            harmonic_decay=0.65,
+            harmonic_amp_threshold=0.1,
+            max_harmonics=64,
+        )
+        sur = surrogate_stage(base, surrogate=model, fast_k=args.fast_k)
+        return surrogate_training_adapter(sur)
 
-    workers = 0 if "cuda" in str(device) else 2
+    test_num = min(1024, B * 8)
+    test_chunks = max(1, (test_num + B - 1) // B)
+
+    def make_test_stream():
+        base = harmonic_stage(
+            n=n,
+            C=C,
+            chunk_size=B,
+            seed=args.seed,
+            device=device,
+            harmonic_decay=0.65,
+            harmonic_amp_threshold=0.1,
+            max_harmonics=64,
+        )
+        sur = surrogate_stage(base, surrogate=model, fast_k=args.fast_k)
+        return iter_take(surrogate_training_adapter(sur), test_chunks)
+
+    train_dataset = IterableFactoryDataset(make_train_stream)
+    test_dataset = IterableFactoryDataset(make_test_stream)
+
+    workers = 0 if "cuda" in str(device) else 0
     train_loader = DataLoader(
         train_dataset,
         batch_size=None,
@@ -222,6 +127,8 @@ def main():
     model = RHSurrogate(
         sequence_length=seq_max,
         bucket_count=C,
+        stride=seq_max // C,
+        fast_k=args.fast_k,
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_layers=args.num_layers,
@@ -243,13 +150,13 @@ def main():
     meta = {
         "n": n,
         "C": C,
-        "max_C": C,
         "seq_max": seq_max,
+        "stride": seq_max // C,
         "seed": args.seed,
         "fast_k": args.fast_k,
-        "harmonic_decay": train_dataset.harmonic_decay,
-        "harmonic_amp_threshold": train_dataset.harmonic_amp_threshold,
-        "max_harmonics": train_dataset.max_harmonics,
+        "harmonic_decay": 0.65,
+        "harmonic_amp_threshold": 0.1,
+        "max_harmonics": 64,
         "d_model": args.d_model,
         "n_heads": args.n_heads,
         "num_layers": args.num_layers,
@@ -267,20 +174,20 @@ def main():
             break
 
         position_tokens = batch[0].to(device)
-        targets_bnC = batch[1].to(device)
+        targets_bCn = batch[1].to(device)
         weights_bn = batch[2].to(device)
 
         optimizer.zero_grad()
 
         logits_full = model(position_tokens)
-        logits = logits_full[:, :, :C]
-        targets = targets_bnC[:, :, :C]
+        logits = logits_full[:, :C, :n]
+        targets = targets_bCn[:, :C, :n]
 
         loss = criterion(logits, targets, weights_bn)
         loss.backward()
         optimizer.step()
 
-        train_acc = bucket_attribution_accuracy_percent(logits, targets)
+        train_acc = bucket_slot_accuracy_percent(logits, targets)
         running_loss += loss.item()
         running_acc += train_acc
         batches_since_eval += 1
@@ -298,10 +205,10 @@ def main():
                     tg = tb[1].to(device)
                     w = tb[2].to(device)
                     lf = model(pt)
-                    lt = lf[:, :, :C]
-                    tt = tg[:, :, :C]
+                    lt = lf[:, :C, :n]
+                    tt = tg[:, :C, :n]
                     test_loss += criterion(lt, tt, w).item()
-                    test_acc += bucket_attribution_accuracy_percent(lt, tt)
+                    test_acc += bucket_slot_accuracy_percent(lt, tt)
                     test_batches += 1
             avg_test = test_loss / max(test_batches, 1)
             avg_test_acc = test_acc / max(test_batches, 1)

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import Tensor
 
-from .rope_bucket_transformer import RoPETransformerEncoderLayer
+from .transformer_core import TransformerBlock
 
 class RHDecoder(nn.Module):
     def __init__(self, sequence_length, bucket_count, d_model=256, n_heads=8, num_layers=4, dim_feedforward=2048, dropout=0.0):
@@ -18,7 +18,14 @@ class RHDecoder(nn.Module):
         
         # Deep N-layer Transformer backbone with continuous RoPE
         self.layers = nn.ModuleList([
-            RoPETransformerEncoderLayer(d_model, n_heads, dim_feedforward=dim_feedforward, dropout=dropout) 
+            TransformerBlock(
+                d_model=d_model,
+                n_heads=n_heads,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                use_rope=True,
+                mode="self",
+            )
             for _ in range(num_layers)
         ])
         

@@ -4,7 +4,7 @@ import triton.language as tl
 from jaxtyping import Float, Int
 from torch import Tensor
 
-from ._python_ops import _gather_perm_incoming, _get_permutation, _validate_lpap_dtypes
+from ._python_ops import _reshape_incoming_to_pipeline, _validate_lpap_dtypes
 
 
 @triton.jit
@@ -64,7 +64,7 @@ def _linear_probing_amplitude_pool_kernel(
         winner_abs = tl.abs(winner_vals)
         t_abs_cmp = tl.abs(current_out_vals)
 
-        update_mask = (winner_abs > t_abs_cmp) & c_mask
+        update_mask = (winner_abs >= t_abs_cmp) & c_mask
 
         disp_vals = current_out_vals
         disp_carry = current_out_carry
@@ -90,13 +90,15 @@ def triton_linear_probing_amplitude_pooling(
     incoming_values: Float[Tensor, "batch n"],
     incoming_carry_id: Int[Tensor, "batch n"],
     k: int,
-    seed: int = 42,
 ) -> tuple[Float[Tensor, "batch capacity"], Int[Tensor, "batch capacity"], Int[Tensor, "batch capacity"]]:
     """
     Triton LPAP: same semantics as :func:`python_linear_probing_amplitude_pooling`.
 
     Same dtype contract: **``torch.float32``** values, **``torch.int32``** integer tables and
-    ``incoming_carry_id``. **Incoming** is not modified (shared permuted gather). The kernel writes
+    ``incoming_carry_id``. **Incoming** is not modified. ``incoming_values`` is expected to already be
+    shuffled; ``incoming_carry_id`` may be any position-aligned payload (e.g. shuffled source ids or
+    contiguous slot ids ``0..n-1``).
+    The kernel writes
     contiguous staging buffers when needed and copies back—**ownership is an optimization hint**, not
     a mandate to mutate every buffer in place.
     """
@@ -113,9 +115,8 @@ def triton_linear_probing_amplitude_pooling(
 
     _validate_lpap_dtypes(table_values, table_dib, table_carry_id, incoming_values, incoming_carry_id)
 
-    perm = _get_permutation(n, seed, incoming_values.device).unsqueeze(0).expand(batch_size, -1)
-    inc_vals, inc_carry = _gather_perm_incoming(
-        incoming_values, incoming_carry_id, batch_size, stride, C, perm
+    inc_vals, inc_carry = _reshape_incoming_to_pipeline(
+        incoming_values, incoming_carry_id, batch_size, stride
     )
 
     inc_dib = torch.zeros((batch_size, stride, C), dtype=torch.int32, device=inc_vals.device)

@@ -1,8 +1,9 @@
-"""Train RHDecoder on surrogate-derived bucket tokens with surrogate-aligned permuted-slot supervision."""
+"""Train RHReconstructor on synthetic harmonic series from decoder-derived tokens."""
 
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -10,29 +11,36 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-_SUR = Path(__file__).resolve().parent
-sys.path.insert(0, str(_SUR))
-sys.path.insert(0, str(_SUR.parent / "src"))
+_EXP = Path(__file__).resolve().parent
+sys.path.insert(0, str(_EXP))
+sys.path.insert(0, str(_EXP.parent / "src"))
 
-from rh_memory.decoder import RHDecoder, RHDecoderLoss
+from rh_memory.decoder import RHDecoder
+from rh_memory.reconstructor import RHReconstructor, RHReconstructorLoss
 from rh_memory.surrogate import RHSurrogate
 
 from pipeline import (
-    decoder_training_adapter,
+    decoder_stage,
     harmonic_stage,
     iter_take,
+    reconstructor_training_adapter,
     surrogate_stage,
     worker_init_fn,
 )
 from pipeline.utils import IterableFactoryDataset
 
 
+def relative_l2_percent(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
+    err = torch.linalg.vector_norm(pred - target, ord=2, dim=1)
+    den = torch.linalg.vector_norm(target, ord=2, dim=1).clamp_min(eps)
+    return ((err / den).mean().item()) * 100.0
+
+
 def load_surrogate(checkpoint_path: Path, device: torch.device):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     meta = ckpt["meta"]
-    seq_max = meta["seq_max"]
     model = RHSurrogate(
-        sequence_length=seq_max,
+        sequence_length=meta["seq_max"],
         bucket_count=meta["C"],
         stride=meta["stride"],
         fast_k=meta["fast_k"],
@@ -40,32 +48,61 @@ def load_surrogate(checkpoint_path: Path, device: torch.device):
         n_heads=meta["n_heads"],
         num_layers=meta["num_layers"],
         dim_feedforward=meta["dim_feedforward"],
-    )
+    ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
-    model = model.to(device)
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
     return model, meta
 
 
+def load_decoder(
+    checkpoint_path: Path,
+    device: torch.device,
+    sequence_length: int,
+    bucket_count: int,
+    d_model: int,
+    n_heads: int,
+    num_layers: int,
+    ff_mult: int,
+):
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model = RHDecoder(
+        sequence_length=sequence_length,
+        bucket_count=bucket_count,
+        d_model=d_model,
+        n_heads=n_heads,
+        num_layers=num_layers,
+        dim_feedforward=d_model * ff_mult,
+    ).to(device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+    return model
+
+
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Train RHDecoder on surrogate bucket features; labels = j_star (same pass, no LPAP in loop)."
-    )
+    p = argparse.ArgumentParser(description="Train RHReconstructor from decoder-derived tokens.")
     p.add_argument("--surrogate-checkpoint", type=Path, default=Path("experiments/surrogate_checkpoint.pt"))
+    p.add_argument("--decoder-checkpoint", type=Path, default=Path("experiments/decoder_surrogate_checkpoint.pt"))
     p.add_argument("--n", type=int, default=None, help="Override sequence length (default: from surrogate meta)")
     p.add_argument("--C", type=int, default=None, help="Override bucket count (default: from surrogate meta)")
     p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--decoder-d-model", type=int, default=512)
+    p.add_argument("--decoder-n-heads", type=int, default=16)
+    p.add_argument("--decoder-num-layers", type=int, default=6)
+    p.add_argument("--decoder-ff-mult", type=int, default=4)
     p.add_argument("--d-model", type=int, default=512)
     p.add_argument("--n-heads", type=int, default=16)
-    p.add_argument("--num-layers", type=int, default=6)
+    p.add_argument("--num-token-layers", type=int, default=4)
+    p.add_argument("--num-query-layers", type=int, default=4)
     p.add_argument("--ff-mult", type=int, default=4)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--total-steps", type=int, default=50_000_000 // 128)
     p.add_argument("--eval-every", type=int, default=50_000 // 128)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--checkpoint", type=Path, default=Path("experiments/decoder_surrogate_checkpoint.pt"))
+    p.add_argument("--checkpoint", type=Path, default=Path("experiments/reconstructor_checkpoint.pt"))
     return p.parse_args()
 
 
@@ -82,9 +119,19 @@ def main():
     C = args.C if args.C is not None else meta["C"]
     if n % C != 0:
         raise ValueError(f"Grouped permutation mode requires n % C == 0, got n={n}, C={C}")
-    seq_len = n
 
-    print(f"n={n}, C={C}, decoder sequence_length={seq_len}")
+    decoder = load_decoder(
+        args.decoder_checkpoint,
+        device,
+        sequence_length=n,
+        bucket_count=C,
+        d_model=args.decoder_d_model,
+        n_heads=args.decoder_n_heads,
+        num_layers=args.decoder_num_layers,
+        ff_mult=args.decoder_ff_mult,
+    )
+    print(f"Loaded decoder from {args.decoder_checkpoint}")
+    print(f"n={n}, C={C}")
 
     B = args.batch_size
     def make_train_stream():
@@ -99,7 +146,8 @@ def main():
             max_harmonics=meta["max_harmonics"],
         )
         sur = surrogate_stage(base, surrogate=surrogate, fast_k=meta["fast_k"])
-        return decoder_training_adapter(sur)
+        dec = decoder_stage(sur, decoder=decoder)
+        return reconstructor_training_adapter(dec)
 
     test_num = min(1024, B * 8)
     test_chunks = max(1, (test_num + B - 1) // B)
@@ -116,7 +164,8 @@ def main():
             max_harmonics=meta["max_harmonics"],
         )
         sur = surrogate_stage(base, surrogate=surrogate, fast_k=meta["fast_k"])
-        return iter_take(decoder_training_adapter(sur), test_chunks)
+        dec = decoder_stage(sur, decoder=decoder)
+        return iter_take(reconstructor_training_adapter(dec), test_chunks)
 
     train_dataset = IterableFactoryDataset(make_train_stream)
     test_dataset = IterableFactoryDataset(make_test_stream)
@@ -137,30 +186,31 @@ def main():
         worker_init_fn=worker_init_fn,
     )
 
-    decoder = RHDecoder(
-        sequence_length=seq_len,
+    model = RHReconstructor(
+        sequence_length=n,
         bucket_count=C,
         d_model=args.d_model,
         n_heads=args.n_heads,
-        num_layers=args.num_layers,
+        num_token_layers=args.num_token_layers,
+        num_query_layers=args.num_query_layers,
         dim_feedforward=args.d_model * args.ff_mult,
     ).to(device)
 
-    criterion = RHDecoderLoss()
-    optimizer = optim.AdamW(decoder.parameters(), lr=args.lr)
+    criterion = RHReconstructorLoss()
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 
     start_step = 0
     if args.checkpoint.exists():
-        print(f"Loading decoder checkpoint from {args.checkpoint}...")
+        print(f"Loading checkpoint from {args.checkpoint}...")
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        decoder.load_state_dict(ckpt["model_state_dict"])
+        model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_step = ckpt.get("step", 0)
         print(f"Resumed from step {start_step}")
 
-    decoder.train()
+    model.train()
     running_loss = 0.0
-    running_accuracy = 0.0
+    running_rel_l2 = 0.0
     batches_since_eval = 0
 
     for step_idx, batch in enumerate(train_loader, 1):
@@ -168,84 +218,69 @@ def main():
         if step > args.total_steps:
             break
 
-        batch_tokens = batch[0].to(device)
-        batch_targets = batch[1].to(device)
-        batch_abs_amplitude = batch[2].to(device)
-        j_target = batch[3].to(device)
-        valid_bucket = batch[4].to(device)
+        recon_tokens = batch[0].to(device)
+        target_series = batch[1].to(device)
 
         optimizer.zero_grad()
-
-        logits = decoder(batch_tokens)
-        loss = criterion(logits, batch_targets, batch_abs_amplitude)
-
+        pred = model(recon_tokens)
+        loss = criterion(pred, target_series)
         loss.backward()
         optimizer.step()
 
-        _, predicted_indices = torch.max(logits, dim=2)
-        active_mask = valid_bucket & (batch_abs_amplitude > 0.01)
-        correct = (predicted_indices == j_target) & active_mask
-
-        total_active = active_mask.sum().item()
-        accuracy = (correct.sum().item() / total_active * 100) if total_active > 0 else 0.0
-
         running_loss += loss.item()
-        running_accuracy += accuracy
+        running_rel_l2 += relative_l2_percent(pred.detach(), target_series.detach())
         batches_since_eval += 1
 
         if step % args.eval_every == 0 or step == 1:
-            avg_loss = running_loss / batches_since_eval
-            avg_acc = running_accuracy / batches_since_eval
+            avg_train = running_loss / batches_since_eval
+            avg_train_rel_l2 = running_rel_l2 / batches_since_eval
 
-            decoder.eval()
+            model.eval()
             test_loss = 0.0
-            test_acc = 0.0
+            test_rel_l2 = 0.0
             test_batches = 0
             with torch.no_grad():
                 for tb in test_loader:
-                    b_toks = tb[0].to(device)
-                    b_targs = tb[1].to(device)
-                    b_abs = tb[2].to(device)
-                    j_tgt = tb[3].to(device)
-                    vb = tb[4].to(device)
-
-                    logits_t = decoder(b_toks)
-                    tl = criterion(logits_t, b_targs, b_abs)
-
-                    _, pred_idx = torch.max(logits_t, dim=2)
-                    am = vb & (b_abs > 0.01)
-                    corr = (pred_idx == j_tgt) & am
-                    tot_a = am.sum().item()
-                    acc_t = (corr.sum().item() / tot_a * 100) if tot_a > 0 else 0.0
-
+                    tokens_t = tb[0].to(device)
+                    target_t = tb[1].to(device)
+                    pred_t = model(tokens_t)
+                    tl = criterion(pred_t, target_t)
                     test_loss += tl.item()
-                    test_acc += acc_t
+                    test_rel_l2 += relative_l2_percent(pred_t, target_t)
                     test_batches += 1
 
-            avg_test_loss = test_loss / max(test_batches, 1)
-            avg_test_acc = test_acc / max(test_batches, 1)
-
+            avg_test = test_loss / max(test_batches, 1)
+            avg_test_rel_l2 = test_rel_l2 / max(test_batches, 1)
             print(
-                f"Step {step} | Train Loss: {avg_loss:.6f} | Train Acc: {avg_acc:.2f}% | "
-                f"Test Loss: {avg_test_loss:.6f} | Test Acc: {avg_test_acc:.2f}%"
+                f"Step {step} | Train MSE: {avg_train:.6f} | Train RelL2: {avg_train_rel_l2:.2f}% | "
+                f"Test MSE: {avg_test:.6f} | Test RelL2: {avg_test_rel_l2:.2f}%"
             )
 
             torch.save(
                 {
                     "step": step,
-                    "model_state_dict": decoder.state_dict(),
+                    "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
-                    "surrogate_checkpoint": str(args.surrogate_checkpoint),
-                    "meta": meta,
+                    "meta": {
+                        "n": n,
+                        "C": C,
+                        "seed": args.seed,
+                        "fast_k": meta["fast_k"],
+                        "d_model": args.d_model,
+                        "n_heads": args.n_heads,
+                        "num_token_layers": args.num_token_layers,
+                        "num_query_layers": args.num_query_layers,
+                        "dim_feedforward": args.d_model * args.ff_mult,
+                    },
                 },
                 args.checkpoint,
             )
             print(f"Saved checkpoint to {args.checkpoint}")
 
             running_loss = 0.0
-            running_accuracy = 0.0
+            running_rel_l2 = 0.0
             batches_since_eval = 0
-            decoder.train()
+            model.train()
 
     print("Training finished.")
 

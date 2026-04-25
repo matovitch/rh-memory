@@ -6,18 +6,6 @@ import torch
 from jaxtyping import Float, Int
 from torch import Tensor
 
-_permutation_cache = {}
-
-
-def _get_permutation(n: int, seed: int, device: torch.device | str) -> Int[Tensor, "n"]:
-    key = (n, seed, str(device))
-    if key not in _permutation_cache:
-        g = torch.Generator(device=device)
-        g.manual_seed(seed)
-        _permutation_cache[key] = torch.randperm(n, generator=g, device=device)
-    return _permutation_cache[key]
-
-
 def _validate_lpap_dtypes(
     table_values: Tensor,
     table_dib: Tensor,
@@ -37,30 +25,19 @@ def _validate_lpap_dtypes(
         raise TypeError("incoming_carry_id must be torch.int32")
 
 
-def _gather_perm_incoming(
+def _reshape_incoming_to_pipeline(
     incoming_values: Tensor,
     incoming_carry_id: Tensor,
     batch_size: int,
     stride: int,
-    C: int,
-    perm: Tensor,
 ) -> tuple[Tensor, Tensor]:
-    """Permute-gather into owned buffers; does **not** modify the caller's ``incoming_*`` tensors."""
-    # Dense row-major (B, n) so ``view(B, stride, C)`` is contiguous; avoid propagating alien strides from ``incoming_*``.
-    gather_vals = torch.empty(
-        incoming_values.shape,
-        dtype=incoming_values.dtype,
-        device=incoming_values.device,
-    )
-    gather_carry = torch.empty(
-        incoming_carry_id.shape,
-        dtype=incoming_carry_id.dtype,
-        device=incoming_carry_id.device,
-    )
-    torch.gather(incoming_values, 1, perm, out=gather_vals)
-    torch.gather(incoming_carry_id, 1, perm, out=gather_carry)
-    inc_vals = gather_vals.view(batch_size, stride, C)
-    inc_carry = gather_carry.view(batch_size, stride, C)
+    """Reshape pre-shuffled incoming tensors into pipeline view [B, stride, C]."""
+    if incoming_values.shape != incoming_carry_id.shape:
+        raise ValueError("incoming_values and incoming_carry_id must have matching shape")
+    n = incoming_values.size(1)
+    C = n // stride
+    inc_vals = incoming_values.contiguous().view(batch_size, stride, C)
+    inc_carry = incoming_carry_id.contiguous().view(batch_size, stride, C)
     return inc_vals, inc_carry
 
 
@@ -71,19 +48,19 @@ def python_linear_probing_amplitude_pooling(
     incoming_values   : Float [Tensor, "batch n"],
     incoming_carry_id : Int   [Tensor, "batch n"],
     k: int,
-    seed: int = 42,
 ) -> tuple[Float[Tensor, "batch capacity"], Int[Tensor, "batch capacity"], Int[Tensor, "batch capacity"]]:
     """
     Reference **linear-probing-based amplitude pooling** (Python): scatter-swap with virtual DIB.
 
     All tensors use **``torch.float32``** (``table_values``, ``incoming_values``) and **``torch.int32``**
     (``table_dib``, ``table_carry_id``, ``incoming_carry_id``). **Table** state is updated in place;
-    **incoming** is read only; the permuted pipeline is held in internal gather buffers.
+    **incoming** is read only. ``incoming_values`` is assumed to already be in permuted/shuffled order;
+    ``incoming_carry_id`` can be any position-aligned payload (including contiguous slot ids).
 
     Ordering: **absolute amplitude** with strict ``>`` vs the table; **max over stride** for pipeline
     winners. Zeros participate like any magnitude.
 
-    Allocates gather buffers and ``disp_*`` swap buffers once per call (outside the ``k`` loop).
+    Allocates ``disp_*`` swap buffers once per call (outside the ``k`` loop).
     """
     if table_values.dim() != 2:
         raise ValueError("table_values must be shaped (B, C)")
@@ -98,10 +75,8 @@ def python_linear_probing_amplitude_pooling(
 
     _validate_lpap_dtypes(table_values, table_dib, table_carry_id, incoming_values, incoming_carry_id)
 
-    perm = _get_permutation(n, seed, incoming_values.device).unsqueeze(0).expand(batch_size, -1)
-
-    inc_vals, inc_carry = _gather_perm_incoming(
-        incoming_values, incoming_carry_id, batch_size, stride, C, perm
+    inc_vals, inc_carry = _reshape_incoming_to_pipeline(
+        incoming_values, incoming_carry_id, batch_size, stride
     )
 
     inc_base_dib = torch.zeros((batch_size, stride, C), dtype=torch.int32, device=inc_vals.device)
@@ -123,7 +98,7 @@ def python_linear_probing_amplitude_pooling(
         win_abs = win_vals.abs()
         t_abs = table_values.abs()
 
-        update_mask = win_abs > t_abs
+        update_mask = win_abs >= t_abs
 
         disp_vals.copy_(table_values)
         disp_carry.copy_(table_carry_id)

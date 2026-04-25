@@ -1,28 +1,36 @@
-# RH-Memory Architecture: System Overview for AI Agents
+# RH-Memory Documentation Portal
 
-## Overview
+Use this page to choose between authoritative implementation contracts and exploratory notes.
+Read `spec/*` for what runs now, and `notes/*` for where the architecture is heading.
 
-RH-Memory routes a length-`n` signal through **linear-probing-based amplitude pooling (LPAP)** into a length-`C` bottleneck table (**`C << n`**), then maps table state back toward sequence (or image) semantics. The bottleneck is **structured competition under fixed pooling rules**, not a free dense latent.
+## Current Ground Truth (Spec)
 
-**Concrete specs:** **[pooling.md](pooling.md)** — permutation routing, scatter–swap, virtual DIB, dtypes, **`python_linear_probing_amplitude_pooling`** / **`triton_linear_probing_amplitude_pooling`**.
+- [spec/index.md](spec/index.md)
+- [spec/objectives.md](spec/objectives.md)
+- [spec/pipeline.md](spec/pipeline.md)
+- [spec/models.md](spec/models.md)
+- [spec/pooling.md](spec/pooling.md)
 
-**Decoder and surrogate:** **[decoder.md](decoder.md)** — **`RHDecoder`** vs **`RHSurrogate`** layouts, **`BCEWithLogits`**-style losses weighted by amplitude, RoPE axes, **two-stage synthetic training** (`train_surrogate.py`, `train_decoder_surrogate.py`). Sparse sequence targets describe **decoder** supervision; surrogate training uses LPAP-derived teachers on the permuted stream.
+These pages are code-aligned and normative.
 
-**Motivation (saliency, surrogate vs discrete pooler, what “forgetting” can mean, curriculum ideas):** **[philosophy.md](philosophy.md)** — conceptual framing only; it does not duplicate tensor contracts.
+## Research Notes / Directions
 
-## Key Lexicon
+- [notes/philosophy.md](notes/philosophy.md)
+- [notes/cifar_plan.md](notes/cifar_plan.md)
+- [notes/synthetic_signals.md](notes/synthetic_signals.md)
+- [notes/memory_roadmap.md](notes/memory_roadmap.md)
 
-- **`n`:** Input / sequence dimension (scalar).
-- **`C`:** Bucket count after pooling (scalar).
-- **`stride`:** `n // C` — pipeline rows in the `[stride, C]` grid when `n` is divisible by `C`.
-- **`dib` (DIB):** Distance-to-initial-bucket metadata along the probe chain (see **pooling.md**).
-- **`carry_id`:** Integral payload per slot (e.g. source index for supervision); use a sentinel such as `-1` for empty.
+These pages capture rationale, roadmap, and evolving ideas. They are non-normative.
 
-## Module Map
+## Recommended Reading Order
 
-1. **[philosophy.md](philosophy.md)** — Intent: autoencoder reading of the stack, saliency bias, surrogate vs discrete teacher, retention / forgetting as bottleneck-level phenomena.
-2. **[pooling.md](pooling.md)** — LPAP semantics and implementations (Python + Triton).
-3. **[decoder.md](decoder.md)** — Token contracts, **`RHDecoder`** / **`RHSurrogate`**, losses, optional attention notes, synthetic training entrypoints.
-4. **[experiment_plan_cifar_flow_rh.md](experiment_plan_cifar_flow_rh.md)** — CIFAR-style roadmap: flow matching, surrogate anchoring, staged training (orthogonal to the minimal synthetic scripts above).
-5. **[synthetic_harmonic_signals.md](synthetic_harmonic_signals.md)** — Harmonic peak generator (`harmonic_raw_batch` in `experiments/synthetic_lpap_pipeline.py`).
-6. **[immediate_todos.md](immediate_todos.md)** — Short-lived scratch queue only.
+1. [spec/index.md](spec/index.md)
+2. [spec/objectives.md](spec/objectives.md)
+3. [spec/pipeline.md](spec/pipeline.md)
+4. [spec/models.md](spec/models.md)
+5. [spec/pooling.md](spec/pooling.md)
+6. Then notes as needed.
+
+## Temporary Scratch
+
+- [immediate_todos.md](immediate_todos.md)

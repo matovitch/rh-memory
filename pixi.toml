@@ -9,10 +9,10 @@ version = "0.1.0"
 cuda = "12.0"
 
 [tasks]
-# Usage: extra CLI args go after `--`, e.g. `pixi run test -- tests/test_decoder.py -q`
+# Usage: extra CLI args go after `--`, e.g. `pixi run test -- tests/test_surrogate.py -q`
 test = "python -m pytest"
 train-surrogate = "python experiments/train_surrogate.py"
-train-decoder-surrogate = "python experiments/train_decoder_surrogate.py"
+train-decoder = "python experiments/train_decoder.py"
 train-reconstructor = "python experiments/train_reconstructor.py"
 
 [dependencies]

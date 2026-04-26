@@ -73,17 +73,29 @@ def test_surrogate_forward_shape_with_ring_causal_mask(surrogate_dims):
 
 def test_rhsurrogate_loss(surrogate_dims):
     B, n, C = surrogate_dims["batch_size"], surrogate_dims["n"], surrogate_dims["C"]
-    gt_idx = torch.randint(0, n, (B, C))
-    targets = torch.zeros(B, C, n)
-    targets.scatter_(2, gt_idx.unsqueeze(2), 1.0)
+    target_idx = torch.randint(0, n, (B, C))
+    valid_bucket = torch.ones(B, C, dtype=torch.bool)
 
     abs_amp = torch.abs(torch.randn(B, C))
 
     loss_fn = RHSurrogateLoss()
-    logits = torch.randn(B, C, n)
-    loss = loss_fn(logits, targets, abs_amp)
+    logits = torch.randn(B, C, n, requires_grad=True)
+    loss = loss_fn(logits, target_idx, abs_amp, valid_bucket)
 
     assert loss.dim() == 0
     assert not torch.isnan(loss)
     assert loss.item() > 0
+    loss.backward()
+    assert logits.grad is not None
+
+
+def test_rhsurrogate_loss_ignores_invalid_buckets(surrogate_dims):
+    B, n, C = surrogate_dims["batch_size"], surrogate_dims["n"], surrogate_dims["C"]
+    target_idx = torch.randint(0, n, (B, C))
+    valid_bucket = torch.zeros(B, C, dtype=torch.bool)
+    abs_amp = torch.ones(B, C)
+    logits = torch.randn(B, C, n, requires_grad=True)
+    loss = RHSurrogateLoss()(logits, target_idx, abs_amp, valid_bucket)
+    assert torch.isfinite(loss)
+    assert loss.item() == 0.0
 

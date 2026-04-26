@@ -1,33 +1,29 @@
-"""Train RHReconstructor on synthetic harmonic series from decoder-derived tokens."""
+"""Train RHReconstructor from a frozen surrogate and frozen soft-distilled decoder."""
 
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader
 
-_EXP = Path(__file__).resolve().parent
-sys.path.insert(0, str(_EXP))
-sys.path.insert(0, str(_EXP.parent / "src"))
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT / "src"))
 
 from rh_memory.decoder import RHDecoder
 from rh_memory.reconstructor import RHReconstructor, RHReconstructorLoss
 from rh_memory.surrogate import RHSurrogate
 
-from pipeline import (
+from rh_memory.pipeline import (
+    PipelineConfig,
     decoder_stage,
     harmonic_stage,
     iter_take,
     reconstructor_training_adapter,
     surrogate_stage,
-    worker_init_fn,
 )
-from pipeline.utils import IterableFactoryDataset
 
 
 def relative_l2_percent(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
@@ -38,71 +34,73 @@ def relative_l2_percent(pred: torch.Tensor, target: torch.Tensor, eps: float = 1
 
 def load_surrogate(checkpoint_path: Path, device: torch.device):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    meta = ckpt["meta"]
+    if ckpt.get("version") != "v2_ce_no_decoder":
+        raise ValueError(
+            f"Unsupported surrogate checkpoint version {ckpt.get('version')!r}; "
+            "retrain the surrogate with the CE/no-decoder pipeline."
+        )
+    config = PipelineConfig.from_dict(ckpt["config"])
+    model_config = ckpt["model_config"]
     model = RHSurrogate(
-        sequence_length=meta["seq_max"],
-        bucket_count=meta["C"],
-        stride=meta["stride"],
-        fast_k=meta["fast_k"],
-        d_model=meta["d_model"],
-        n_heads=meta["n_heads"],
-        num_layers=meta["num_layers"],
-        dim_feedforward=meta["dim_feedforward"],
+        sequence_length=config.sequence_length,
+        bucket_count=config.C,
+        stride=config.stride,
+        fast_k=config.fast_k,
+        d_model=model_config["d_model"],
+        n_heads=model_config["n_heads"],
+        num_layers=model_config["num_layers"],
+        dim_feedforward=model_config["dim_feedforward"],
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
-    return model, meta
+    return model, config
 
 
-def load_decoder(
-    checkpoint_path: Path,
-    device: torch.device,
-    sequence_length: int,
-    bucket_count: int,
-    d_model: int,
-    n_heads: int,
-    num_layers: int,
-    ff_mult: int,
-):
+def load_decoder(checkpoint_path: Path, device: torch.device):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if ckpt.get("version") != "v1_soft_decoder_distill":
+        raise ValueError(
+            f"Unsupported decoder checkpoint version {ckpt.get('version')!r}; "
+            "train the decoder with the soft distillation pipeline."
+        )
+    config = PipelineConfig.from_dict(ckpt["config"])
+    model_config = ckpt["model_config"]
     model = RHDecoder(
-        sequence_length=sequence_length,
-        bucket_count=bucket_count,
-        d_model=d_model,
-        n_heads=n_heads,
-        num_layers=num_layers,
-        dim_feedforward=d_model * ff_mult,
+        sequence_length=config.sequence_length,
+        bucket_count=config.C,
+        d_model=model_config["d_model"],
+        n_heads=model_config["n_heads"],
+        num_layers=model_config["num_layers"],
+        dim_feedforward=model_config["dim_feedforward"],
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
-    return model
+    return model, config, ckpt
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train RHReconstructor from decoder-derived tokens.")
-    p.add_argument("--surrogate-checkpoint", type=Path, default=Path("experiments/surrogate_checkpoint.pt"))
-    p.add_argument("--decoder-checkpoint", type=Path, default=Path("experiments/decoder_surrogate_checkpoint.pt"))
+    p = argparse.ArgumentParser(description="Train RHReconstructor from frozen soft surrogate/decoder tokens.")
+    p.add_argument("--surrogate-checkpoint", type=Path, default=Path("experiments/surrogate_ce_checkpoint.pt"))
+    p.add_argument("--decoder-checkpoint", type=Path, default=Path("experiments/decoder_soft_distill_checkpoint.pt"))
     p.add_argument("--n", type=int, default=None, help="Override sequence length (default: from surrogate meta)")
     p.add_argument("--C", type=int, default=None, help="Override bucket count (default: from surrogate meta)")
-    p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--decoder-d-model", type=int, default=512)
-    p.add_argument("--decoder-n-heads", type=int, default=16)
-    p.add_argument("--decoder-num-layers", type=int, default=6)
-    p.add_argument("--decoder-ff-mult", type=int, default=4)
-    p.add_argument("--d-model", type=int, default=512)
-    p.add_argument("--n-heads", type=int, default=16)
+    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--d-model", type=int, default=256)
+    p.add_argument("--n-heads", type=int, default=8)
     p.add_argument("--num-token-layers", type=int, default=4)
     p.add_argument("--num-query-layers", type=int, default=4)
     p.add_argument("--ff-mult", type=int, default=4)
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--reconstructor-token-mode", choices=("hard", "soft"), default="hard")
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--total-steps", type=int, default=50_000_000 // 128)
     p.add_argument("--eval-every", type=int, default=50_000 // 128)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--checkpoint", type=Path, default=Path("experiments/reconstructor_checkpoint.pt"))
+    p.add_argument("--checkpoint", type=Path, default=Path("experiments/reconstructor_frozen_decoder_checkpoint.pt"))
     return p.parse_args()
 
 
@@ -112,83 +110,70 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    surrogate, meta = load_surrogate(args.surrogate_checkpoint, device)
+    surrogate, surrogate_config = load_surrogate(args.surrogate_checkpoint, device)
     print(f"Loaded surrogate from {args.surrogate_checkpoint}")
-
-    n = args.n if args.n is not None else meta["n"]
-    C = args.C if args.C is not None else meta["C"]
-    if n % C != 0:
-        raise ValueError(f"Grouped permutation mode requires n % C == 0, got n={n}, C={C}")
-
-    decoder = load_decoder(
-        args.decoder_checkpoint,
-        device,
-        sequence_length=n,
-        bucket_count=C,
-        d_model=args.decoder_d_model,
-        n_heads=args.decoder_n_heads,
-        num_layers=args.decoder_num_layers,
-        ff_mult=args.decoder_ff_mult,
-    )
+    decoder, decoder_config, decoder_ckpt = load_decoder(args.decoder_checkpoint, device)
     print(f"Loaded decoder from {args.decoder_checkpoint}")
-    print(f"n={n}, C={C}")
 
-    B = args.batch_size
+    n = args.n if args.n is not None else surrogate_config.n
+    C = args.C if args.C is not None else surrogate_config.C
+    if n != surrogate_config.n or C != surrogate_config.C:
+        raise ValueError(
+            "Reconstructor n/C overrides must match the frozen surrogate checkpoint; "
+            f"got n={n}, C={C}, checkpoint has n={surrogate_config.n}, C={surrogate_config.C}."
+        )
+    if n != decoder_config.n or C != decoder_config.C:
+        raise ValueError(
+            "Reconstructor n/C overrides must match the frozen decoder checkpoint; "
+            f"got n={n}, C={C}, checkpoint has n={decoder_config.n}, C={decoder_config.C}."
+        )
+    config = PipelineConfig(
+        n=n,
+        C=C,
+        batch_size=args.batch_size,
+        seed=args.seed,
+        fast_k=surrogate_config.fast_k,
+        harmonic_decay=surrogate_config.harmonic_decay,
+        harmonic_amp_threshold=surrogate_config.harmonic_amp_threshold,
+        max_harmonics=surrogate_config.max_harmonics,
+    )
+    print(f"n={config.n}, C={config.C}")
+    print(f"reconstructor_token_mode={args.reconstructor_token_mode}")
+
     def make_train_stream():
         base = harmonic_stage(
-            n=n,
-            C=C,
-            chunk_size=B,
-            seed=meta["seed"],
+            config=config,
             device=device,
-            harmonic_decay=meta["harmonic_decay"],
-            harmonic_amp_threshold=meta["harmonic_amp_threshold"],
-            max_harmonics=meta["max_harmonics"],
         )
-        sur = surrogate_stage(base, surrogate=surrogate, fast_k=meta["fast_k"])
-        dec = decoder_stage(sur, decoder=decoder)
+        sur = surrogate_stage(base, config=config, surrogate=surrogate, temperature=args.temperature)
+        dec = decoder_stage(
+            sur,
+            decoder=decoder,
+            temperature=args.temperature,
+            token_mode=args.reconstructor_token_mode,
+        )
         return reconstructor_training_adapter(dec)
 
-    test_num = min(1024, B * 8)
-    test_chunks = max(1, (test_num + B - 1) // B)
+    test_num = min(1024, config.batch_size * 8)
+    test_chunks = max(1, (test_num + config.batch_size - 1) // config.batch_size)
 
     def make_test_stream():
         base = harmonic_stage(
-            n=n,
-            C=C,
-            chunk_size=B,
-            seed=meta["seed"],
+            config=config,
             device=device,
-            harmonic_decay=meta["harmonic_decay"],
-            harmonic_amp_threshold=meta["harmonic_amp_threshold"],
-            max_harmonics=meta["max_harmonics"],
         )
-        sur = surrogate_stage(base, surrogate=surrogate, fast_k=meta["fast_k"])
-        dec = decoder_stage(sur, decoder=decoder)
+        sur = surrogate_stage(base, config=config, surrogate=surrogate, temperature=args.temperature)
+        dec = decoder_stage(
+            sur,
+            decoder=decoder,
+            temperature=args.temperature,
+            token_mode=args.reconstructor_token_mode,
+        )
         return iter_take(reconstructor_training_adapter(dec), test_chunks)
 
-    train_dataset = IterableFactoryDataset(make_train_stream)
-    test_dataset = IterableFactoryDataset(make_test_stream)
-
-    workers = 0 if "cuda" in str(device) else 0
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=None,
-        num_workers=workers,
-        prefetch_factor=None,
-        worker_init_fn=worker_init_fn,
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=None,
-        num_workers=workers,
-        prefetch_factor=None,
-        worker_init_fn=worker_init_fn,
-    )
-
     model = RHReconstructor(
-        sequence_length=n,
-        bucket_count=C,
+        sequence_length=config.n,
+        bucket_count=config.C,
         d_model=args.d_model,
         n_heads=args.n_heads,
         num_token_layers=args.num_token_layers,
@@ -203,20 +188,27 @@ def main():
     if args.checkpoint.exists():
         print(f"Loading checkpoint from {args.checkpoint}...")
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        if ckpt.get("version") != "v4_frozen_soft_decoder_reconstructor":
+            raise ValueError(
+                f"Unsupported reconstructor checkpoint version {ckpt.get('version')!r}; "
+                "use a v4 frozen soft decoder/reconstructor checkpoint or choose a new --checkpoint path."
+            )
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_step = ckpt.get("step", 0)
         print(f"Resumed from step {start_step}")
 
+    decoder.eval()
     model.train()
     running_loss = 0.0
     running_rel_l2 = 0.0
     batches_since_eval = 0
 
-    for step_idx, batch in enumerate(train_loader, 1):
+    train_stream = make_train_stream()
+
+    for step_idx in range(1, args.total_steps - start_step + 1):
+        batch = next(train_stream)
         step = start_step + step_idx
-        if step > args.total_steps:
-            break
 
         recon_tokens = batch[0].to(device)
         target_series = batch[1].to(device)
@@ -235,12 +227,13 @@ def main():
             avg_train = running_loss / batches_since_eval
             avg_train_rel_l2 = running_rel_l2 / batches_since_eval
 
+            decoder.eval()
             model.eval()
             test_loss = 0.0
             test_rel_l2 = 0.0
             test_batches = 0
             with torch.no_grad():
-                for tb in test_loader:
+                for tb in make_test_stream():
                     tokens_t = tb[0].to(device)
                     target_t = tb[1].to(device)
                     pred_t = model(tokens_t)
@@ -261,11 +254,18 @@ def main():
                     "step": step,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "version": "v4_frozen_soft_decoder_reconstructor",
+                    "checkpoint_role": "reconstructor",
+                    "source_script": "experiments/train_reconstructor.py",
                     "meta": {
-                        "n": n,
-                        "C": C,
+                        "config": config.to_dict(),
                         "seed": args.seed,
-                        "fast_k": meta["fast_k"],
+                        "temperature": args.temperature,
+                        "reconstructor_token_mode": args.reconstructor_token_mode,
+                        "surrogate_checkpoint": str(args.surrogate_checkpoint),
+                        "decoder_checkpoint": str(args.decoder_checkpoint),
+                        "decoder_version": decoder_ckpt.get("version"),
+                        "decoder_model_config": decoder_ckpt.get("model_config"),
                         "d_model": args.d_model,
                         "n_heads": args.n_heads,
                         "num_token_layers": args.num_token_layers,
@@ -280,6 +280,7 @@ def main():
             running_loss = 0.0
             running_rel_l2 = 0.0
             batches_since_eval = 0
+            decoder.eval()
             model.train()
 
     print("Training finished.")

@@ -7,36 +7,28 @@ import torch
 from .primitives_harmonic import harmonic_raw_batch
 from .primitives_permutation import build_grouped_permutation, gather_permuted_stream
 
+from .config import PipelineConfig
 from .types import HarmonicSample
 
 
 def harmonic_stage(
     *,
-    n: int,
-    C: int,
-    chunk_size: int,
-    seed: int,
+    config: PipelineConfig,
     device: torch.device | str,
-    harmonic_decay: float,
-    harmonic_amp_threshold: float,
-    max_harmonics: int,
 ) -> Iterator[HarmonicSample]:
+    perm_1d = build_grouped_permutation(config.n, config.C, config.seed, device)
     while True:
         raw_inputs = harmonic_raw_batch(
-            chunk_size,
-            n,
+            config.batch_size,
+            config.n,
             device,
-            harmonic_decay,
-            harmonic_amp_threshold,
-            max_harmonics,
+            config.harmonic_decay,
+            config.harmonic_amp_threshold,
+            config.max_harmonics,
         )
-        perm_1d = build_grouped_permutation(n, C, seed, device)
         x_perm = gather_permuted_stream(raw_inputs, perm_1d)
         yield HarmonicSample(
             raw_inputs=raw_inputs,
             perm_1d=perm_1d,
             x_perm=x_perm,
-            n=n,
-            C=C,
-            chunk_size=chunk_size,
         )

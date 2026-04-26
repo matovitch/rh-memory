@@ -1,9 +1,9 @@
-"""Differentiable surrogate backbone over bucket tokens (same output geometry as RHDecoder)."""
+"""Differentiable surrogate backbone over bucket tokens."""
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from jaxtyping import Float
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
 import math
 
@@ -12,10 +12,9 @@ from .transformer_core import TransformerBlock
 
 class RHSurrogate(nn.Module):
     """
-    RoPE Transformer over **C** bucket tokens with width ``stride = n // C``.
+    RoPE Transformer over **C** bucket tokens with width ``stride = N // C``.
 
-    Layout matches :class:`RHDecoder` output geometry: logits ``[B, C, n]`` (per bucket,
-    distribution over source indices).
+    Outputs logits ``[B, C, N]``: one source-index distribution per bucket.
     """
 
     def __init__(
@@ -29,7 +28,7 @@ class RHSurrogate(nn.Module):
         num_layers: int = 4,
         dim_feedforward: int = 2048,
         dropout: float = 0.0,
-    ):
+    ) -> None:
         super().__init__()
         self.sequence_length = sequence_length
         self.bucket_count = bucket_count
@@ -57,11 +56,11 @@ class RHSurrogate(nn.Module):
 
         self.output_proj = nn.Linear(d_model, sequence_length)
 
-    def forward(self, bucket_tokens: Float[Tensor, "batch C stride"]) -> Float[Tensor, "batch C n"]:
+    def forward(self, bucket_tokens: Float[Tensor, "B C stride"]) -> Float[Tensor, "B C N"]:
         """
-        bucket_tokens: [batch_size, C, stride] — grouped amplitudes per bucket token.
+        bucket_tokens: [B, C, stride] — grouped amplitudes per bucket token.
 
-        Returns logits [batch_size, C, sequence_length].
+        Returns logits [B, C, sequence_length].
         """
         x = self.input_proj(bucket_tokens)
         attn_mask = self._build_ring_causal_mask(x.device)
@@ -71,7 +70,7 @@ class RHSurrogate(nn.Module):
 
         return self.output_proj(x)
 
-    def _build_ring_causal_mask(self, device: torch.device) -> Tensor:
+    def _build_ring_causal_mask(self, device: torch.device) -> Bool[Tensor, "C C"]:
         """
         Ring-causal local mask over bucket tokens.
 
@@ -93,26 +92,41 @@ class RHSurrogate(nn.Module):
 
 
 class RHSurrogateLoss(nn.Module):
-    """Weighted BCE for :class:`RHSurrogate` logits ``[B, C, n]`` (per-bucket salience weights)."""
+    """Weighted cross entropy for :class:`RHSurrogate` logits ``[B, C, N]``."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
     def forward(
         self,
-        logits: Float[Tensor, "batch C n"],
-        targets: Float[Tensor, "batch C n"],
-        abs_amplitude: Float[Tensor, "batch C"],
+        logits: Float[Tensor, "B C N"],
+        target_idx: Int[Tensor, "B C"],
+        abs_amplitude: Float[Tensor, "B C"],
+        valid_bucket: Bool[Tensor, "B C"] | None = None,
     ) -> Float[Tensor, ""]:
         """
-        logits: ``[batch_size, C, n]``
-        targets: ``[batch_size, C, n]`` — sparse ground-truth masks ``1.0`` / ``0.0`` (which source index each bucket maps to).
-        abs_amplitude: ``[batch_size, C]`` — per-bucket weight.
+        logits: ``[B, C, N]``
+        target_idx: ``[B, C]`` — target source index for each bucket.
+        abs_amplitude: ``[B, C]`` — per-bucket weight.
+        valid_bucket: optional ``[B, C]`` mask. Invalid buckets contribute zero loss.
         """
-        bce_loss_raw = F.binary_cross_entropy_with_logits(
-            logits,
-            targets,
+        B, C, n = logits.shape
+        if target_idx.shape != (B, C):
+            raise ValueError(f"target_idx must have shape ({B}, {C}), got {tuple(target_idx.shape)}")
+        if abs_amplitude.shape != (B, C):
+            raise ValueError(f"abs_amplitude must have shape ({B}, {C}), got {tuple(abs_amplitude.shape)}")
+        if valid_bucket is None:
+            valid = torch.ones(B, C, dtype=torch.bool, device=logits.device)
+        else:
+            if valid_bucket.shape != (B, C):
+                raise ValueError(f"valid_bucket must have shape ({B}, {C}), got {tuple(valid_bucket.shape)}")
+            valid = valid_bucket.to(device=logits.device, dtype=torch.bool)
+
+        ce = F.cross_entropy(
+            logits.reshape(B * C, n),
+            target_idx.to(device=logits.device, dtype=torch.long).reshape(B * C),
             reduction="none",
-        )
-        weighted_loss = bce_loss_raw * abs_amplitude.unsqueeze(2)
-        return weighted_loss.mean()
+        ).view(B, C)
+        weights = abs_amplitude.to(device=logits.device, dtype=logits.dtype) * valid.to(dtype=logits.dtype)
+        denom = weights.sum().clamp_min(torch.finfo(logits.dtype).eps)
+        return (ce * weights).sum() / denom

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import Callable, Iterable, Iterator, TypeVar
 
-from torch.utils.data import IterableDataset
-
 T = TypeVar("T")
 U = TypeVar("U")
 
@@ -23,21 +21,3 @@ def iter_take(stream: Iterable[T], max_items: int | None) -> Iterator[T]:
             break
         yield item
         n += 1
-
-
-def worker_init_fn(worker_id):
-    import torch
-
-    worker_seed = torch.initial_seed() % 2**32
-    torch.manual_seed(worker_seed)
-
-
-class IterableFactoryDataset(IterableDataset):
-    """Lightweight dataset wrapper around an iterable factory."""
-
-    def __init__(self, factory: Callable[[], Iterable]):
-        super().__init__()
-        self.factory = factory
-
-    def __iter__(self):
-        yield from self.factory()

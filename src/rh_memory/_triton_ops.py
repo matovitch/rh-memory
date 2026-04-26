@@ -84,33 +84,31 @@ def _linear_probing_amplitude_pool_kernel(
 
 
 def triton_linear_probing_amplitude_pooling(
-    table_values: Float[Tensor, "batch capacity"],
-    table_dib: Int[Tensor, "batch capacity"],
-    table_carry_id: Int[Tensor, "batch capacity"],
-    incoming_values: Float[Tensor, "batch n"],
-    incoming_carry_id: Int[Tensor, "batch n"],
+    table_values: Float[Tensor, "B C"],
+    table_dib: Int[Tensor, "B C"],
+    table_carry_id: Int[Tensor, "B C"],
+    incoming_values: Float[Tensor, "B N"],
+    incoming_carry_id: Int[Tensor, "B N"],
     k: int,
-) -> tuple[Float[Tensor, "batch capacity"], Int[Tensor, "batch capacity"], Int[Tensor, "batch capacity"]]:
+) -> tuple[Float[Tensor, "B C"], Int[Tensor, "B C"], Int[Tensor, "B C"]]:
     """
     Triton LPAP: same semantics as :func:`python_linear_probing_amplitude_pooling`.
 
     Same dtype contract: **``torch.float32``** values, **``torch.int32``** integer tables and
-    ``incoming_carry_id``. **Incoming** is not modified. ``incoming_values`` is expected to already be
-    shuffled; ``incoming_carry_id`` may be any position-aligned payload (e.g. shuffled source ids or
-    contiguous slot ids ``0..n-1``).
-    The kernel writes
-    contiguous staging buffers when needed and copies back—**ownership is an optimization hint**, not
-    a mandate to mutate every buffer in place.
+    ``incoming_carry_id``. **Incoming** tensors may be mutated as scratch storage when contiguous;
+    callers that need read-only incoming tensors must pass clones. ``incoming_values`` is expected to
+    already be shuffled; ``incoming_carry_id`` may be any position-aligned payload (e.g. shuffled
+    source ids or contiguous slot ids ``0..N-1``).
     """
     if table_values.dim() != 2:
         raise ValueError("table_values must be shaped (B, C)")
     if incoming_values.dim() != 2:
-        raise ValueError("incoming_values must be shaped (B, n)")
+        raise ValueError("incoming_values must be shaped (B, N)")
 
     batch_size, n = incoming_values.shape
     C = table_values.size(1)
     if n % C != 0:
-        raise ValueError("n must be divisible by C")
+        raise ValueError("N must be divisible by C")
     stride = n // C
 
     _validate_lpap_dtypes(table_values, table_dib, table_carry_id, incoming_values, incoming_carry_id)

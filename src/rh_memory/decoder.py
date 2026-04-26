@@ -1,4 +1,7 @@
-import torch
+"""Differentiable decoder bridge over soft surrogate bucket tokens."""
+
+from __future__ import annotations
+
 import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
@@ -6,84 +9,84 @@ from torch import Tensor
 
 from .transformer_core import TransformerBlock
 
+
 class RHDecoder(nn.Module):
-    def __init__(self, sequence_length, bucket_count, d_model=256, n_heads=8, num_layers=4, dim_feedforward=2048, dropout=0.0):
+    """
+    Decode soft surrogate bucket tokens ``[B, C, 3]`` into per-bucket logits ``[B, C, N]``.
+
+    Token channels are ``[soft_amplitude, soft_normalized_dib, surrogate_doubt]``.
+    """
+
+    def __init__(
+        self,
+        sequence_length: int,
+        bucket_count: int,
+        d_model: int = 256,
+        n_heads: int = 8,
+        num_layers: int = 4,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.0,
+    ) -> None:
         super().__init__()
         self.sequence_length = sequence_length
         self.bucket_count = bucket_count
-        self.d_model = d_model
-        
-        # Continuous projection: signed_value + DIB per bucket (carry_id stays inside pooler only).
-        self.input_proj = nn.Linear(2, d_model)
-        
-        # Deep N-layer Transformer backbone with continuous RoPE
-        self.layers = nn.ModuleList([
-            TransformerBlock(
-                d_model=d_model,
-                n_heads=n_heads,
-                dim_feedforward=dim_feedforward,
-                dropout=dropout,
-                use_rope=True,
-                mode="self",
-            )
-            for _ in range(num_layers)
-        ])
-        
-        # Dense head projecting back out to sequence domain: [B, C, D_model] -> [B, C, n]
+
+        self.input_proj = nn.Linear(3, d_model)
+        self.layers = nn.ModuleList(
+            [
+                TransformerBlock(
+                    d_model=d_model,
+                    n_heads=n_heads,
+                    dim_feedforward=dim_feedforward,
+                    dropout=dropout,
+                    use_rope=True,
+                    mode="self",
+                )
+                for _ in range(num_layers)
+            ]
+        )
         self.output_proj = nn.Linear(d_model, sequence_length)
 
-    def forward(self, bucket_tokens: Float[Tensor, "batch C 2"]) -> Float[Tensor, "batch C n"]:
-        """
-        Forward pass for the decoder backbone.
-
-        bucket_tokens: [batch_size, C, 2] — per bucket:
-            1. signed_value (signed amplitude sample from pooler table)
-            2. dib (distance to initial bucket as float)
-
-        Source indices (carry_id) are computed inside the pooler for targets only, not fed here.
-        """
-        x = self.input_proj(bucket_tokens)
-        
+    def forward(self, decoder_tokens: Float[Tensor, "B C 3"]) -> Float[Tensor, "B C N"]:
+        if decoder_tokens.size(1) != self.bucket_count:
+            raise ValueError(
+                f"Expected bucket_count={self.bucket_count}, got tokens with C={decoder_tokens.size(1)}"
+            )
+        x = self.input_proj(decoder_tokens)
         for layer in self.layers:
             x = layer(x)
-            
-        logits = self.output_proj(x)
-        return logits
+        return self.output_proj(x)
 
-    def reconstruct(self, logits: Float[Tensor, "batch C n"]) -> Float[Tensor, "batch n"]:
-        """
-        Reconstructs the original [B, n] sequence using max extraction per bucket
-        and reducing over collisions with scatter_add.
-        logits: FloatTensor of shape [batch_size, C, n]
-        """
-        batch_size, C, n = logits.shape
-        
-        # 1. Determine single most likely position for each bucket (max over dim=2)
-        # predicted_indices shape: [batch_size, C]
-        max_logits, predicted_indices = torch.max(logits, dim=2)
-        
-        # 2. Project back via scatter_add onto a neutral [batch_size, n] tensor
-        reconstructed = torch.zeros(batch_size, n, device=logits.device, dtype=logits.dtype)
-        reconstructed.scatter_add_(1, predicted_indices, max_logits)
-        
-        return reconstructed
 
-class RHDecoderLoss(nn.Module):
-    """Weighted BCE for :class:`RHDecoder` logits ``[B, C, n]`` (per-bucket salience weights)."""
+class RHDecoderDistillationLoss(nn.Module):
+    """Weighted soft KL distillation from surrogate logits to decoder logits."""
 
-    def __init__(self):
+    def __init__(self, temperature: float = 1.0) -> None:
         super().__init__()
+        if temperature <= 0:
+            raise ValueError(f"temperature must be positive, got {temperature}")
+        self.temperature = temperature
 
-    def forward(self, logits: Float[Tensor, "batch C n"], targets: Float[Tensor, "batch C n"], abs_amplitude: Float[Tensor, "batch C"]) -> Float[Tensor, ""]:
-        """
-        logits: ``[batch_size, C, n]``
-        targets: ``[batch_size, C, n]`` — sparse ground-truth masks ``1.0`` / ``0.0``.
-        abs_amplitude: ``[batch_size, C]`` — per-bucket weight, typically ``|signed_value|`` for active slots.
-        """
-        bce_loss_raw = F.binary_cross_entropy_with_logits(
-            logits,
-            targets,
-            reduction="none",
-        )
-        weighted_loss = bce_loss_raw * abs_amplitude.unsqueeze(2)
-        return weighted_loss.mean()
+    def forward(
+        self,
+        decoder_logits: Float[Tensor, "B C N"],
+        teacher_logits: Float[Tensor, "B C N"],
+        weights: Float[Tensor, "B C"],
+    ) -> Float[Tensor, ""]:
+        if decoder_logits.shape != teacher_logits.shape:
+            raise ValueError(
+                f"decoder_logits and teacher_logits must have matching shapes, "
+                f"got {tuple(decoder_logits.shape)} and {tuple(teacher_logits.shape)}"
+            )
+        B, C, _n = decoder_logits.shape
+        if weights.shape != (B, C):
+            raise ValueError(f"weights must have shape ({B}, {C}), got {tuple(weights.shape)}")
+
+        temperature = self.temperature
+        teacher_probs = F.softmax(teacher_logits.detach() / temperature, dim=-1)
+        decoder_log_probs = F.log_softmax(decoder_logits / temperature, dim=-1)
+        kl = F.kl_div(decoder_log_probs, teacher_probs, reduction="none").sum(dim=-1)
+        kl = kl * (temperature * temperature)
+        weights = weights.to(device=decoder_logits.device, dtype=decoder_logits.dtype)
+        denom = weights.sum().clamp_min(decoder_logits.new_tensor(1e-12))
+        return (kl * weights).sum() / denom

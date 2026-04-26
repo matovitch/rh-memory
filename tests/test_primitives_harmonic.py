@@ -7,9 +7,8 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "experiments"))
 
-from pipeline.primitives_harmonic import harmonic_raw_batch
+from rh_memory.pipeline.primitives_harmonic import harmonic_raw_batch
 
 
 def test_harmonic_raw_batch_shape_dtype_and_finite():

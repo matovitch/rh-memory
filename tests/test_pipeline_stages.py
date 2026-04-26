@@ -7,25 +7,25 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "experiments"))
 
-from pipeline import (
-    DecoderSample,
+from rh_memory.pipeline import (
+    DecoderInferenceSample,
     HarmonicSample,
-    SurrogateSample,
+    PipelineConfig,
+    SurrogateInferenceSample,
     decoder_stage,
-    decoder_training_adapter,
     harmonic_stage,
     iter_take,
     reconstructor_training_adapter,
     surrogate_stage,
     surrogate_training_adapter,
 )
+from rh_memory.pipeline.primitives_tokens import reshape_permuted_to_bucket_tokens
 from rh_memory.decoder import RHDecoder
 from rh_memory.surrogate import RHSurrogate
 
 
-def _models(n: int, C: int):
+def _surrogate(n: int, C: int):
     surrogate = RHSurrogate(
         sequence_length=n,
         bucket_count=C,
@@ -36,6 +36,11 @@ def _models(n: int, C: int):
         num_layers=1,
         dim_feedforward=128,
     )
+    surrogate.eval()
+    return surrogate
+
+
+def _decoder(n: int, C: int):
     decoder = RHDecoder(
         sequence_length=n,
         bucket_count=C,
@@ -44,23 +49,17 @@ def _models(n: int, C: int):
         num_layers=1,
         dim_feedforward=128,
     )
-    surrogate.eval()
     decoder.eval()
-    return surrogate, decoder
+    return decoder
 
 
 def test_pipeline_stage_shapes():
     n, C, B = 32, 8, 2
-    surrogate, decoder = _models(n, C)
+    config = PipelineConfig(n=n, C=C, batch_size=B, seed=7, fast_k=1.0, max_harmonics=8)
+    surrogate = _surrogate(n, C)
     base = harmonic_stage(
-        n=n,
-        C=C,
-        chunk_size=B,
-        seed=7,
+        config=config,
         device="cpu",
-        harmonic_decay=0.65,
-        harmonic_amp_threshold=0.1,
-        max_harmonics=8,
     )
     s0 = next(base)
     assert isinstance(s0, HarmonicSample)
@@ -68,80 +67,80 @@ def test_pipeline_stage_shapes():
     assert s0.x_perm.shape == (B, n)
     assert s0.perm_1d.shape == (n,)
 
-    s1 = next(surrogate_stage(iter([s0]), surrogate=surrogate, fast_k=1.0))
-    assert isinstance(s1, SurrogateSample)
-    assert not hasattr(s1, "surrogate_logits")
-    assert s1.decoder_tokens_sur.shape == (B, C, 2)
+    s1 = next(surrogate_stage(iter([s0]), config=config, surrogate=surrogate))
+    assert isinstance(s1, SurrogateInferenceSample)
+    assert s1.raw_inputs.shape == (B, n)
+    assert s1.perm_1d.shape == (n,)
+    assert s1.x_perm.shape == (B, n)
+    assert s1.surrogate_logits.shape == (B, C, n)
+    assert s1.decoder_tokens.shape == (B, C, 3)
 
+    decoder = _decoder(n, C)
     s2 = next(decoder_stage(iter([s1]), decoder=decoder))
-    assert isinstance(s2, DecoderSample)
-    assert not hasattr(s2, "decoder_logits")
-    assert s2.reconstructor_tokens.shape == (B, C, 3)
+    assert isinstance(s2, DecoderInferenceSample)
     assert s2.raw_inputs.shape == (B, n)
+    assert s2.reconstructor_tokens.shape == (B, C, 3)
+
+    s2_hard = next(decoder_stage(iter([s1]), decoder=decoder, token_mode="hard"))
+    assert isinstance(s2_hard, DecoderInferenceSample)
+    assert s2_hard.raw_inputs.shape == (B, n)
+    assert s2_hard.reconstructor_tokens.shape == (B, C, 3)
 
 
 def test_pipeline_adapters_shapes():
     n, C, B = 32, 8, 2
-    surrogate, decoder = _models(n, C)
+    config = PipelineConfig(n=n, C=C, batch_size=B, seed=11, fast_k=1.0, max_harmonics=8)
+    surrogate = _surrogate(n, C)
     base = harmonic_stage(
-        n=n,
-        C=C,
-        chunk_size=B,
-        seed=11,
+        config=config,
         device="cpu",
-        harmonic_decay=0.65,
-        harmonic_amp_threshold=0.1,
-        max_harmonics=8,
     )
-    sur_stream = surrogate_stage(base, surrogate=surrogate, fast_k=1.0)
-    s_batch = next(surrogate_training_adapter(sur_stream))
+    s_batch = next(surrogate_training_adapter(base, config=config))
     assert s_batch[0].shape == (B, C, n // C)
-    assert s_batch[1].shape == (B, C, n)
+    assert s_batch[1].shape == (B, C)
     assert s_batch[2].shape == (B, C)
+    assert s_batch[3].shape == (B, C)
 
     base2 = harmonic_stage(
-        n=n,
-        C=C,
-        chunk_size=B,
-        seed=11,
+        config=config,
         device="cpu",
-        harmonic_decay=0.65,
-        harmonic_amp_threshold=0.1,
-        max_harmonics=8,
     )
-    sur2 = surrogate_stage(base2, surrogate=surrogate, fast_k=1.0)
-    d_batch = next(decoder_training_adapter(sur2))
-    assert d_batch[0].shape == (B, C, 2)
-    assert d_batch[1].shape == (B, C, n)
-
-    base3 = harmonic_stage(
-        n=n,
-        C=C,
-        chunk_size=B,
-        seed=11,
-        device="cpu",
-        harmonic_decay=0.65,
-        harmonic_amp_threshold=0.1,
-        max_harmonics=8,
-    )
-    sur3 = surrogate_stage(base3, surrogate=surrogate, fast_k=1.0)
-    dec3 = decoder_stage(sur3, decoder=decoder)
-    r_batch = next(reconstructor_training_adapter(dec3))
+    decoder = _decoder(n, C)
+    sur2 = surrogate_stage(base2, config=config, surrogate=surrogate)
+    dec2 = decoder_stage(sur2, decoder=decoder)
+    r_batch = next(reconstructor_training_adapter(dec2))
     assert r_batch[0].shape == (B, C, 3)
     assert r_batch[1].shape == (B, n)
 
 
+def test_surrogate_training_adapter_keeps_sample_x_perm_read_only():
+    n, C, B = 32, 8, 2
+    config = PipelineConfig(n=n, C=C, batch_size=B, seed=13, fast_k=1.0, max_harmonics=8)
+    sample = next(harmonic_stage(config=config, device="cpu"))
+    x_before = sample.x_perm.clone()
+
+    bucket_input, _target_idx, _valid_bucket, _weights = next(
+        surrogate_training_adapter(iter([sample]), config=config)
+    )
+
+    assert torch.equal(sample.x_perm, x_before)
+    assert torch.equal(bucket_input, reshape_permuted_to_bucket_tokens(x_before, C))
+
+
 def test_iter_take_limits_stream():
     n, C, B = 16, 4, 2
+    config = PipelineConfig(n=n, C=C, batch_size=B, seed=3, fast_k=1.0, max_harmonics=8)
     base = harmonic_stage(
-        n=n,
-        C=C,
-        chunk_size=B,
-        seed=3,
+        config=config,
         device="cpu",
-        harmonic_decay=0.65,
-        harmonic_amp_threshold=0.1,
-        max_harmonics=8,
     )
     taken = list(iter_take(base, 2))
     assert len(taken) == 2
+
+
+def test_pipeline_config_validation():
+    config = PipelineConfig(n=32, C=8, batch_size=2, seed=1, fast_k=1.0)
+    assert config.stride == 4
+    assert config.sequence_length == 32
+    assert config.bucket_count == 8
+    assert config.k_eff >= 1

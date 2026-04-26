@@ -1,77 +1,70 @@
-import sys; from pathlib import Path; sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+import sys
+from pathlib import Path
 
-import pytest
 import torch
-import torch.nn as nn
-from rh_memory.decoder import RHDecoder, RHDecoderLoss
 
-@pytest.fixture
-def dummy_data():
-    batch_size = 2
-    C = 16
-    n = 64
-    d_model = 32
-    n_heads = 4
-    num_layers = 2
-    
-    tokens = torch.randn(batch_size, C, 2)
-    # Per-bucket BCE weights (here: random positive, like |amplitude|)
-    abs_amplitude = torch.abs(torch.randn(batch_size, C))
-    
-    # Ground truth positions (random sequence indices)
-    gt_indices = torch.randint(0, n, (batch_size, C))
-    targets = torch.zeros(batch_size, C, n)
-    targets.scatter_(2, gt_indices.unsqueeze(2), 1.0)
-    
-    return {
-        'batch_size': batch_size,
-        'C': C,
-        'n': n,
-        'd_model': d_model,
-        'n_heads': n_heads,
-        'num_layers': num_layers,
-        'tokens': tokens,
-        'targets': targets,
-        'abs_amplitude': abs_amplitude,
-        'gt_indices': gt_indices
-    }
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-def test_decoder_forward(dummy_data):
-    decoder = RHDecoder(
-        sequence_length=dummy_data['n'],
-        bucket_count=dummy_data['C'],
-        d_model=dummy_data['d_model'],
-        n_heads=dummy_data['n_heads'],
-        num_layers=dummy_data['num_layers']
+from rh_memory.decoder import RHDecoder, RHDecoderDistillationLoss
+
+
+def test_decoder_forward_shape():
+    B, C, n = 2, 8, 32
+    model = RHDecoder(
+        sequence_length=n,
+        bucket_count=C,
+        d_model=64,
+        n_heads=4,
+        num_layers=2,
+        dim_feedforward=128,
+        dropout=0.0,
     )
-    
-    tokens = dummy_data['tokens']
-    logits = decoder(tokens)
-    
-    assert logits.shape == (dummy_data['batch_size'], dummy_data['C'], dummy_data['n']), \
-        f"Expected output shape {(dummy_data['batch_size'], dummy_data['C'], dummy_data['n'])}, but got {logits.shape}"
+    tokens = torch.randn(B, C, 3)
+    logits = model(tokens)
+    assert logits.shape == (B, C, n)
+    assert torch.isfinite(logits).all()
 
-def test_decoder_reconstruction(dummy_data):
-    decoder = RHDecoder(
-        sequence_length=dummy_data['n'],
-        bucket_count=dummy_data['C'],
-        d_model=dummy_data['d_model'],
-        n_heads=dummy_data['n_heads'],
-        num_layers=dummy_data['num_layers']
+
+def test_decoder_allows_gradient_flow_to_tokens():
+    B, C, n = 2, 8, 32
+    model = RHDecoder(
+        sequence_length=n,
+        bucket_count=C,
+        d_model=64,
+        n_heads=4,
+        num_layers=1,
+        dim_feedforward=128,
+        dropout=0.0,
     )
-    
-    logits = torch.randn(dummy_data['batch_size'], dummy_data['C'], dummy_data['n'])
-    reconstructed = decoder.reconstruct(logits)
-    
-    assert reconstructed.shape == (dummy_data['batch_size'], dummy_data['n']), \
-        f"Expected reconstructed shape {(dummy_data['batch_size'], dummy_data['n'])}, but got {reconstructed.shape}"
+    tokens = torch.randn(B, C, 3, requires_grad=True)
+    logits = model(tokens)
+    loss = logits.square().mean()
+    loss.backward()
+    assert tokens.grad is not None
+    assert torch.isfinite(tokens.grad).all()
 
-def test_rh_decoder_loss(dummy_data):
-    loss_fn = RHDecoderLoss()
-    logits = torch.randn(dummy_data["batch_size"], dummy_data["C"], dummy_data["n"])
 
-    loss = loss_fn(logits, dummy_data["targets"], dummy_data["abs_amplitude"])
+def test_decoder_distillation_loss_scalar_and_grad():
+    B, C, n = 2, 4, 16
+    decoder_logits = torch.randn(B, C, n, requires_grad=True)
+    teacher_logits = torch.randn(B, C, n)
+    weights = torch.rand(B, C).abs()
 
-    assert loss.dim() == 0, "Loss should be a scalar"
-    assert not torch.isnan(loss), "Loss should not be NaN"
-    assert loss.item() > 0, "Loss should be positive"
+    loss = RHDecoderDistillationLoss(temperature=2.0)(decoder_logits, teacher_logits, weights)
+    assert loss.dim() == 0
+    assert torch.isfinite(loss)
+    assert loss.item() >= 0.0
+    loss.backward()
+    assert decoder_logits.grad is not None
+    assert torch.isfinite(decoder_logits.grad).all()
+
+
+def test_decoder_distillation_loss_handles_zero_weights():
+    B, C, n = 2, 4, 16
+    decoder_logits = torch.randn(B, C, n, requires_grad=True)
+    teacher_logits = torch.randn(B, C, n)
+    weights = torch.zeros(B, C)
+
+    loss = RHDecoderDistillationLoss()(decoder_logits, teacher_logits, weights)
+    assert torch.isfinite(loss)
+    assert loss.item() == 0.0

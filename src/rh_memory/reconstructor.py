@@ -12,8 +12,8 @@ from .transformer_core import TransformerBlock, TransformerCrossBlock
 
 class RHReconstructor(nn.Module):
     """
-    Reconstruct unpermuted sequence ``[B, n]`` from decoder-derived bucket tokens ``[B, C, 3]``:
-    ``[amplitude, source_index, confidence]``.
+    Reconstruct unpermuted sequence ``[B, N]`` from decoder-derived bucket tokens ``[B, C, 3]``:
+    ``[soft_amplitude, soft_normalized_source_index, decoder_doubt]``.
     """
 
     def __init__(
@@ -26,7 +26,7 @@ class RHReconstructor(nn.Module):
         num_query_layers: int = 4,
         dim_feedforward: int = 2048,
         dropout: float = 0.0,
-    ):
+    ) -> None:
         super().__init__()
         self.sequence_length = sequence_length
         self.bucket_count = bucket_count
@@ -63,22 +63,22 @@ class RHReconstructor(nn.Module):
         )
         self.output_proj = nn.Linear(d_model, 1)
 
-    def encode_tokens(self, bucket_tokens: Float[Tensor, "batch C 3"]) -> Float[Tensor, "batch C d_model"]:
+    def encode_tokens(self, bucket_tokens: Float[Tensor, "B C 3"]) -> Float[Tensor, "B C d_model"]:
         if bucket_tokens.size(1) != self.bucket_count:
             raise ValueError(
                 f"Expected bucket_count={self.bucket_count}, got tokens with C={bucket_tokens.size(1)}"
             )
 
         value = bucket_tokens[..., 0:1]
-        source_index = bucket_tokens[..., 1:2]
-        confidence = bucket_tokens[..., 2:3]
-        x = torch.cat([value, source_index, confidence], dim=-1)
+        normalized_position = bucket_tokens[..., 1:2]
+        doubt = bucket_tokens[..., 2:3]
+        x = torch.cat([value, normalized_position, doubt], dim=-1)
         x = self.input_proj(x)
         for layer in self.token_layers:
             x = layer(x)
         return x
 
-    def forward(self, bucket_tokens: Float[Tensor, "batch C 3"]) -> Float[Tensor, "batch n"]:
+    def forward(self, bucket_tokens: Float[Tensor, "B C 3"]) -> Float[Tensor, "B N"]:
         memory = self.encode_tokens(bucket_tokens)
         batch_size = bucket_tokens.size(0)
         q = self.query_embed.unsqueeze(0).expand(batch_size, -1, -1)
@@ -91,13 +91,13 @@ class RHReconstructor(nn.Module):
 class RHReconstructorLoss(nn.Module):
     """MSE loss for sequence reconstruction."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.criterion = nn.MSELoss()
 
     def forward(
         self,
-        reconstructed: Float[Tensor, "batch n"],
-        target: Float[Tensor, "batch n"],
+        reconstructed: Float[Tensor, "B N"],
+        target: Float[Tensor, "B N"],
     ) -> Float[Tensor, ""]:
         return self.criterion(reconstructed, target)

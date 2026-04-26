@@ -6,12 +6,13 @@ import torch
 from jaxtyping import Float, Int
 from torch import Tensor
 
+
 def _validate_lpap_dtypes(
-    table_values: Tensor,
-    table_dib: Tensor,
-    table_carry_id: Tensor,
-    incoming_values: Tensor,
-    incoming_carry_id: Tensor,
+    table_values: Float[Tensor, "B C"],
+    table_dib: Int[Tensor, "B C"],
+    table_carry_id: Int[Tensor, "B C"],
+    incoming_values: Float[Tensor, "B N"],
+    incoming_carry_id: Int[Tensor, "B N"],
 ) -> None:
     if table_values.dtype != torch.float32:
         raise TypeError("table_values must be torch.float32")
@@ -26,12 +27,12 @@ def _validate_lpap_dtypes(
 
 
 def _reshape_incoming_to_pipeline(
-    incoming_values: Tensor,
-    incoming_carry_id: Tensor,
+    incoming_values: Float[Tensor, "B N"],
+    incoming_carry_id: Int[Tensor, "B N"],
     batch_size: int,
     stride: int,
-) -> tuple[Tensor, Tensor]:
-    """Reshape pre-shuffled incoming tensors into pipeline view [B, stride, C]."""
+) -> tuple[Float[Tensor, "B stride C"], Int[Tensor, "B stride C"]]:
+    """Reshape pre-shuffled incoming tensors into mutable LPAP scratch views [B, stride, C]."""
     if incoming_values.shape != incoming_carry_id.shape:
         raise ValueError("incoming_values and incoming_carry_id must have matching shape")
     n = incoming_values.size(1)
@@ -42,20 +43,22 @@ def _reshape_incoming_to_pipeline(
 
 
 def python_linear_probing_amplitude_pooling(
-    table_values      : Float [Tensor, "batch capacity"],
-    table_dib         : Int   [Tensor, "batch capacity"],
-    table_carry_id    : Int   [Tensor, "batch capacity"],
-    incoming_values   : Float [Tensor, "batch n"],
-    incoming_carry_id : Int   [Tensor, "batch n"],
+    table_values      : Float [Tensor, "B C"],
+    table_dib         : Int   [Tensor, "B C"],
+    table_carry_id    : Int   [Tensor, "B C"],
+    incoming_values   : Float [Tensor, "B N"],
+    incoming_carry_id : Int   [Tensor, "B N"],
     k: int,
-) -> tuple[Float[Tensor, "batch capacity"], Int[Tensor, "batch capacity"], Int[Tensor, "batch capacity"]]:
+) -> tuple[Float[Tensor, "B C"], Int[Tensor, "B C"], Int[Tensor, "B C"]]:
     """
     Reference **linear-probing-based amplitude pooling** (Python): scatter-swap with virtual DIB.
 
     All tensors use **``torch.float32``** (``table_values``, ``incoming_values``) and **``torch.int32``**
-    (``table_dib``, ``table_carry_id``, ``incoming_carry_id``). **Table** state is updated in place;
-    **incoming** is read only. ``incoming_values`` is assumed to already be in permuted/shuffled order;
-    ``incoming_carry_id`` can be any position-aligned payload (including contiguous slot ids).
+    (``table_dib``, ``table_carry_id``, ``incoming_carry_id``). **Table** state is updated in place.
+    **Incoming** tensors may be mutated as scratch storage when contiguous; callers that need to keep
+    incoming tensors read-only must pass clones. ``incoming_values`` is assumed to already be in
+    permuted/shuffled order; ``incoming_carry_id`` can be any position-aligned payload (including
+    contiguous slot ids).
 
     Ordering: **absolute amplitude** with strict ``>`` vs the table; **max over stride** for pipeline
     winners. Zeros participate like any magnitude.
@@ -65,12 +68,12 @@ def python_linear_probing_amplitude_pooling(
     if table_values.dim() != 2:
         raise ValueError("table_values must be shaped (B, C)")
     if incoming_values.dim() != 2:
-        raise ValueError("incoming_values must be shaped (B, n)")
+        raise ValueError("incoming_values must be shaped (B, N)")
 
     batch_size, n = incoming_values.shape
     C = table_values.size(1)
     if n % C != 0:
-        raise ValueError("n must be divisible by C")
+        raise ValueError("N must be divisible by C")
     stride = n // C
 
     _validate_lpap_dtypes(table_values, table_dib, table_carry_id, incoming_values, incoming_carry_id)

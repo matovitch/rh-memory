@@ -8,9 +8,8 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "experiments"))
 
-from pipeline.primitives_permutation import (
+from rh_memory.pipeline.primitives_permutation import (
     build_grouped_permutation,
     gather_permuted_stream,
     unpermute_from_permuted,

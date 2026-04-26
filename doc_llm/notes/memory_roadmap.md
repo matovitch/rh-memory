@@ -5,14 +5,28 @@ This page is non-normative and captures design intent for the next architectural
 Current implemented contracts remain in `doc_llm/spec/*`.
 
 Terminology used here:
+
 - **energy space**: representation regime where magnitude/L2-energy interpretation is meaningful (often task/domain dependent).
 - **compressed space**: LPAP bottleneck-side representation controlled by `C` and routing/thresholding policies.
 
 ## Why Magnitude-Ordered Compression Matters
 
 - LPAP-style competition is ordered by absolute magnitudes, which makes retained content rank-aware.
-- Varying the `C/n` ratio in compressed space suggests a natural progressive-compression axis: smaller `C` yields coarser retained structure; larger `C` preserves more detail.
+- Varying the `C/N` ratio in compressed space suggests a natural progressive-compression axis: smaller `C` yields coarser retained structure; larger `C` preserves more detail.
 - This motivates LoD-like (level-of-detail) behavior as a future memory capability.
+- A concrete training direction is to maintain multiple surrogate bottlenecks for the same source length (for example `N=1024` with `C=64`, `C=128`, and `C=256`) and swap among them during end-to-end flow-matching training, forcing upstream generation and downstream reconstruction to tolerate multiple compression levels.
+
+## Variable-C LoD Training Sketch
+
+For CIFAR-like experiments, a multi-`C` setup could go beyond a single LPAP approximate top-`C` prior:
+
+1. Train or checkpoint surrogate variants at several `C` values.
+2. During end-to-end training, sample a `C` value and route through the corresponding surrogate bottleneck.
+3. Decode with the reconstructor assigned to that `C` value.
+
+This would make `C` an explicit compression/detail control rather than a fixed architectural constant.
+Distinct per-`C` reconstructors are acceptable, and likely preferable at this research stage, because the core objective is to discover/train a LoD-compressible energy space rather than to prove that one decoder can handle arbitrary token counts.
+Keeping the decoders separate helps isolate whether the upstream representation remains meaningful under different compression budgets; a universal variable-token reconstructor can be revisited later as a distillation or deployment convenience.
 
 ## Why L2 / Energy Framing Is Useful
 
@@ -25,7 +39,7 @@ Terminology used here:
 
 - Exponential decay on latent magnitudes can model retention half-life behavior.
 - Thresholding low-magnitude values can act as vacuum/cleanup for explicit forgetting.
-- Combined with LoD controls (`C/n`, thresholds) in compressed space, this gives interpretable tradeoffs between persistence, memory budget, and reconstruction quality.
+- Combined with LoD controls (`C/N`, thresholds) in compressed space, this gives interpretable tradeoffs between persistence, memory budget, and reconstruction quality.
 
 ## Status
 

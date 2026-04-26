@@ -1,71 +1,106 @@
 # Training Objectives Spec
 
 Normative source:
+
 - `experiments/train_surrogate.py`
-- `experiments/train_decoder_surrogate.py`
+- `experiments/train_decoder.py`
 - `experiments/train_reconstructor.py`
-- `experiments/pipeline/adapters.py`
-- `experiments/pipeline/primitives_targets.py`
-- `experiments/pipeline/primitives_tokens.py`
+- `src/rh_memory/pipeline/adapters.py`
+- `src/rh_memory/pipeline/primitives_targets.py`
+- `src/rh_memory/pipeline/primitives_tokens.py`
 
 Scope note:
+
 - This page describes implemented training objectives only; roadmap regularizers and future memory dynamics belong in `doc_llm/notes/*`.
 
 ## Stage 1: Surrogate Objective
 
 Model:
+
 - `RHSurrogate`
 
 Input:
+
 - `surrogate_tokens` `[B, C, stride]`
 
 Target:
-- `targets_bCn` `[B, C, n]` from LPAP teacher (`out_slot_id` -> one-hot per bucket over permuted slot index `j`).
+
+- `target_idx` `[B, C]` from LPAP teacher (`out_slot_id` -> permuted slot index `j` per bucket).
+- `valid_bucket` `[B, C]` marks buckets with valid LPAP teacher assignments.
 
 Loss:
-- `RHSurrogateLoss(logits, targets_bCn, weights_bn)`
-- weighted BCE-with-logits over `[B, C, n]` with per-bucket weights `[B, C]`.
+
+- `RHSurrogateLoss(logits, target_idx, weights_bn, valid_bucket)`
+- weighted cross entropy over logits `[B, C, N]` with sparse targets `[B, C]`.
 
 Metric used in script:
-- bucket-slot accuracy from `argmax(logits, dim=2)` vs `argmax(targets, dim=2)` on rows with teacher assignment.
 
-## Stage 2: Decoder Objective (surrogate-aligned)
+- bucket-slot accuracy from `argmax(logits, dim=2)` vs `target_idx` on valid buckets.
+
+## Stage 2: Decoder Distillation Objective
 
 Model:
+
 - `RHDecoder`
 
 Input:
-- `decoder_tokens_sur` `[B, C, 2]` from frozen surrogate outputs:
-  - channel 0: selected `x_perm` value at `j_star`
-  - channel 1: normalized dib-like quantity `((c - (j_star % C)) % C) / k_eff`
 
-Target:
-- `targets` `[B, C, n]`, one-hot at `j_star_sur` from frozen surrogate pass (`decoder_targets_from_j_star`).
-- No LPAP call in decoder training loop.
+- `decoder_tokens` `[B, C, 3]` from surrogate logits:
+  - soft amplitude from probability-weighted `x_perm`
+  - soft scalar DIB in `[0, 1]`
+  - surrogate doubt from normalized entropy
+
+Output:
+
+- decoder logits `[B, C, N]`.
+
+Teacher:
+
+- frozen surrogate logits `[B, C, N]` from the same `SurrogateInferenceSample`.
 
 Loss:
-- `RHDecoderLoss(logits, targets, abs_amplitude)`
-- weighted BCE-with-logits over `[B, C, n]` with `[B, C]` weights.
 
-Metric used in script:
-- top-1 index accuracy on active buckets (`valid_bucket & (abs_amplitude > 0.01)`).
+- `RHDecoderDistillationLoss(decoder_logits, surrogate_logits, weights)`.
+- teacher probabilities: `softmax(surrogate_logits / temperature)`.
+- student log-probabilities: `log_softmax(decoder_logits / temperature)`.
+- weighted soft KL over `[B, C, N]` distributions.
+- bucket weights are `abs(soft_amplitude)` from decoder tokens.
+
+Scope:
+
+- LPAP targets do not enter decoder training.
+- No discrete target selection is used.
 
 ## Stage 3: Reconstructor Objective
 
 Model:
+
 - `RHReconstructor`
 
 Input:
+
 - `reconstructor_tokens` `[B, C, 3]` from decoder logits:
-  - selected value
-  - normalized source index
-  - selected decoder logit (confidence)
+  - soft amplitude from probability-weighted `x_perm`
+  - soft normalized unpermuted source index in `[0, 1]`
+  - decoder doubt from normalized entropy
 
 Target:
-- `raw_inputs` `[B, n]` (current pipeline target in unpermuted sequence space).
+
+- `raw_inputs` `[B, N]` (current pipeline target in unpermuted sequence space).
 
 Loss:
-- `RHReconstructorLoss` (`MSELoss`) over `[B, n]`.
+
+- `RHReconstructorLoss` (`MSELoss`) over `[B, N]`.
+
+Training setup:
+
+- `train_reconstructor.py` loads a frozen surrogate checkpoint and a frozen soft-distilled decoder checkpoint.
+- Only `RHReconstructor` is optimized in this stage.
 
 Metric used in script:
+
 - relative L2 percent.
+
+Soft-bridge note:
+
+- The active bridge uses softmax-weighted expectations, not discrete index selection. Current staged scripts freeze surrogate during decoder distillation and freeze both surrogate and decoder during reconstructor training.

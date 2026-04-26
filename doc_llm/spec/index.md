@@ -17,6 +17,6 @@ Scope rules:
 ## Spec Pages
 
 - [objectives.md](objectives.md): surrogate / decoder / reconstructor training inputs, targets, losses, and metrics.
-- [pipeline.md](pipeline.md): stage-by-stage contracts and adapter outputs for `experiments/pipeline/*`.
+- [pipeline.md](pipeline.md): stage-by-stage contracts and adapter outputs for `src/rh_memory/pipeline/*`.
 - [models.md](models.md): `RHSurrogate`, `RHDecoder`, `RHReconstructor` I/O, masking, and loss modules.
 - [pooling.md](pooling.md): LPAP operator semantics and API contract.

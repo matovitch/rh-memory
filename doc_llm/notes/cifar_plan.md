@@ -7,7 +7,7 @@ Canonical current behavior is documented in `doc_llm/spec/*`.
 ## Planned Direction
 
 - Domain: grayscale CIFAR flattened to `N=1024`.
-- Objective trend: flow/generator path to produce LPAP-compatible signals, then train with surrogate/reconstructor stages.
+- Objective trend: flow/generator path to produce LPAP-compatible signals, then train with surrogate/decoder soft-scatter stages.
 - Optional endpoint boundary condition: match L2 norm of generated series endpoint to source image norm.
 
 ## LoD-Oriented Multi-C Surrogate Idea
@@ -22,15 +22,15 @@ During end-to-end flow-matching training, swap between these frozen or slowly-up
 
 Implications:
 
-- Use distinct reconstructors per `C` rather than forcing one reconstructor to decode variable token counts initially.
-- The training loop needs either a `C` curriculum/sampling schedule or an explicit conditioning signal that tells the reconstructor/generator which compression level is active.
+- Use distinct decoder/scatter paths per `C` rather than forcing one variable-token decoder to handle every compression level initially.
+- The training loop needs either a `C` curriculum/sampling schedule or an explicit conditioning signal that tells the decoder/generator which compression level is active.
 - Evaluation should report reconstruction/flow quality per `C`, plus aggregate robustness when `C` is sampled.
 
 Rationale:
 
 - The primary target is not a universal variable-token decoder yet; it is discovery/training of a LoD-compressible energy space.
-- Per-`C` reconstructors keep each compression level honest and avoid making reconstructor capacity/conditioning the bottleneck that hides whether the upstream energy-space representation is actually compressible at multiple levels of detail.
-- A variable-token reconstructor can remain a later distillation or deployment objective after the per-`C` energy-space behavior is understood.
+- Per-`C` decoder/scatter paths keep each compression level honest and avoid making variable-token conditioning the bottleneck that hides whether the upstream energy-space representation is actually compressible at multiple levels of detail.
+- A universal variable-token decoder/scatter path can remain a later distillation or deployment objective after the per-`C` energy-space behavior is understood.
 
 ## Why This Lives in Notes
 

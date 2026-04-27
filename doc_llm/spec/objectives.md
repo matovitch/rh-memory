@@ -4,10 +4,11 @@ Normative source:
 
 - `experiments/train_surrogate.py`
 - `experiments/train_decoder.py`
-- `experiments/train_reconstructor.py`
+- `experiments/train_decoder_soft_scatter.py`
 - `src/rh_memory/pipeline/adapters.py`
 - `src/rh_memory/pipeline/primitives_targets.py`
 - `src/rh_memory/pipeline/primitives_tokens.py`
+- `src/rh_memory/decoder_scatter.py`
 
 Scope note:
 
@@ -71,36 +72,44 @@ Scope:
 - LPAP targets do not enter decoder training.
 - No discrete target selection is used.
 
-## Stage 3: Reconstructor Objective
+## Stage 3: Decoder Soft-Scatter L2 Objective
 
 Model:
 
-- `RHReconstructor`
+- pretrained `RHDecoder`
+- `SoftScatterReconstructionHead`
 
 Input:
 
-- `reconstructor_tokens` `[B, C, 3]` from decoder logits:
-  - soft amplitude from probability-weighted `x_perm`
-  - soft normalized unpermuted source index in `[0, 1]`
-  - decoder doubt from normalized entropy
+- `decoder_tokens` `[B, C, 3]` from frozen surrogate logits.
+- `perm_1d` `[N]` from the harmonic stream.
+
+Output:
+
+- decoder logits `[B, C, N]` from `RHDecoder`.
+- soft-scattered reconstruction `[B, N]`:
+  - `probs = softmax(decoder_logits / scatter_temperature, dim=-1)`
+  - scatter-add `decoder_tokens[..., 0] * probs` through `perm_1d` into unpermuted source coordinates.
 
 Target:
 
-- `raw_inputs` `[B, N]` (current pipeline target in unpermuted sequence space).
+- `raw_inputs` `[B, N]` in unpermuted sequence space.
 
 Loss:
 
-- `RHReconstructorLoss` (`MSELoss`) over `[B, N]`.
+- MSE over `[B, N]`.
 
 Training setup:
 
-- `train_reconstructor.py` loads a frozen surrogate checkpoint and a frozen soft-distilled decoder checkpoint.
-- Only `RHReconstructor` is optimized in this stage.
+- `train_decoder_soft_scatter.py` loads a frozen surrogate checkpoint and a pretrained soft-distilled decoder checkpoint.
+- The surrogate is frozen.
+- The decoder and single learnable scatter temperature are optimized.
+- No distillation/KL regularizer is used in the first implementation.
 
 Metric used in script:
 
-- relative L2 percent.
+- relative L2 percent, retained energy, cosine, decoder doubt, and effective support.
 
 Soft-bridge note:
 
-- The active bridge uses softmax-weighted expectations, not discrete index selection. Current staged scripts freeze surrogate during decoder distillation and freeze both surrogate and decoder during reconstructor training.
+- LPAP targets do not enter decoder L2 fine-tuning. The active reconstruction bridge uses full softmax scatter over all decoder slots, not expected-coordinate reduction and not hard argmax.

@@ -10,7 +10,7 @@ Normative dataflow and objective contracts are in:
 ## Generator Context
 
 - Signals are pseudo-harmonic sums with randomized amplitudes, phases, and envelope sharpness.
-- Generation is chunked and used as synthetic input for surrogate/reconstructor training scripts.
+- Generation is chunked and used as synthetic input for surrogate and decoder/scatter training scripts.
 - Grouped permutation (`N % C == 0`) is used in current synthetic pipeline to balance bucket collision structure.
 
 ## Experiment Intent

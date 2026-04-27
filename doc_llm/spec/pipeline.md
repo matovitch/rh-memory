@@ -6,8 +6,8 @@ Normative source:
 - `src/rh_memory/pipeline/types.py`
 - `src/rh_memory/pipeline/stage_harmonic.py`
 - `src/rh_memory/pipeline/stage_surrogate.py`
-- `src/rh_memory/pipeline/stage_decoder.py`
 - `src/rh_memory/pipeline/adapters.py`
+- `src/rh_memory/decoder_scatter.py`
 
 ## Pipeline Config
 
@@ -50,23 +50,14 @@ Soft decoder-token construction:
 4. `soft_normalized_dib = einsum("bcn,cn->bc", probs, dib_table)`
 5. `surrogate_doubt = normalized_entropy(probs)`
 
-### `decoder_stage(...) -> Iterator[DecoderInferenceSample]`
+### Decoder soft-scatter reconstruction
 
-Consumes `SurrogateInferenceSample`, runs `RHDecoder`, and emits soft reconstructor-ready tokens.
-This stage is used with a trainable decoder in `train_decoder.py` and with a frozen pretrained decoder in `train_reconstructor.py`.
+Decoder L2 fine-tuning does not use a learned sequence reconstruction stage. It consumes `SurrogateInferenceSample`, runs `RHDecoder` on `decoder_tokens`, and reconstructs directly with `decoder_soft_scatter(...)`:
 
-`DecoderInferenceSample` fields:
-
-- `raw_inputs`: `[B, N]`
-- `reconstructor_tokens`: `[B, C, 3]` with channels `[soft_amplitude, soft_normalized_source_index, decoder_doubt]`
-
-Soft reconstructor-token construction:
-
-1. `probs = softmax(decoder_logits / temperature, dim=-1)`
-2. `soft_amplitude = einsum("bcn,bn->bc", probs, x_perm)`
-3. `soft_source_idx = einsum("bcn,n->bc", probs, perm_1d.float())`
-4. `soft_normalized_source_index = soft_source_idx / max(1, N - 1)`
-5. `decoder_doubt = normalized_entropy(probs)`
+1. `decoder_logits = decoder(decoder_tokens)` with shape `[B, C, N]`
+2. `probs = softmax(decoder_logits / temperature, dim=-1)`
+3. `weighted_values = probs * decoder_tokens[..., 0].unsqueeze(-1)`
+4. scatter-add `weighted_values` through `perm_1d` into unpermuted `[B, N]`
 
 ## Adapter Contracts
 
@@ -80,10 +71,4 @@ Output tuple:
 3. `valid_bucket`: `[B, C]` bool
 4. surrogate weight `weights`: `[B, C]` (bucket-level amplitude weight, zeroed for invalid buckets)
 
-### `reconstructor_training_adapter(...)`
-
-Input stream: `DecoderInferenceSample`  
-Output tuple:
-
-1. reconstructor input tokens `[B, C, 3]`
-2. MSE target `raw_inputs` `[B, N]`
+No decoder-to-token reconstruction adapter is part of the current pipeline contract.

@@ -22,11 +22,11 @@ For CIFAR-like experiments, a multi-`C` setup could go beyond a single LPAP appr
 
 1. Train or checkpoint surrogate variants at several `C` values.
 2. During end-to-end training, sample a `C` value and route through the corresponding surrogate bottleneck.
-3. Decode with the reconstructor assigned to that `C` value.
+3. Decode with the decoder/scatter path assigned to that `C` value.
 
 This would make `C` an explicit compression/detail control rather than a fixed architectural constant.
-Distinct per-`C` reconstructors are acceptable, and likely preferable at this research stage, because the core objective is to discover/train a LoD-compressible energy space rather than to prove that one decoder can handle arbitrary token counts.
-Keeping the decoders separate helps isolate whether the upstream representation remains meaningful under different compression budgets; a universal variable-token reconstructor can be revisited later as a distillation or deployment convenience.
+Distinct per-`C` decoder/scatter paths are acceptable, and likely preferable at this research stage, because the core objective is to discover/train a LoD-compressible energy space rather than to prove that one decoder can handle arbitrary token counts.
+Keeping the decoders separate helps isolate whether the upstream representation remains meaningful under different compression budgets; a universal variable-token decoder/scatter path can be revisited later as a distillation or deployment convenience.
 
 ## Why L2 / Energy Framing Is Useful
 

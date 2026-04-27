@@ -4,7 +4,7 @@ Normative source:
 
 - `src/rh_memory/surrogate.py`
 - `src/rh_memory/decoder.py`
-- `src/rh_memory/reconstructor.py`
+- `src/rh_memory/decoder_scatter.py`
 
 ## RHSurrogate
 
@@ -48,22 +48,28 @@ Loss module:
 - `RHDecoderDistillationLoss`: weighted soft KL distillation from frozen surrogate logits `[B, C, N]` to decoder logits `[B, C, N]`.
 - Bucket weights are `[B, C]`, typically `abs(soft_amplitude)` from decoder input tokens.
 
-## RHReconstructor
+## SoftScatterReconstructionHead
 
 Input:
 
-- `bucket_tokens`: `[B, C, 3]`
-- soft decoder path channels: `[soft_amplitude, soft_normalized_source_index, decoder_doubt]`
+- decoder logits: `[B, C, N]`
+- bucket amplitudes: `[B, C]`
+- `perm_1d`: `[N]`
 
 Output:
 
 - reconstructed sequence: `[B, N]`
+- decoder probabilities: `[B, C, N]`
+- decoder doubt: `[B, C]`
+- effective support: `[B, C]`
+- positive scalar scatter temperature
 
 Architecture behavior:
 
-- Token encoder is permutation-equivariant over bucket tokens (no RoPE).
-- Learnable query table of length `N` cross-attends into encoded bucket memory.
+- Uses a single learnable global temperature parameterized as `min_temperature + softplus(raw_temperature)`.
+- Computes `softmax(decoder_logits / temperature)` over slots.
+- Scatter-adds `bucket_amplitude * probability` into source coordinates via `perm_1d`.
 
 Loss module:
 
-- `RHReconstructorLoss`: MSE over `[B, N]`.
+- The training script uses plain MSE between soft-scattered reconstruction and `raw_inputs`.

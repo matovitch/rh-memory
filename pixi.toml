@@ -13,7 +13,7 @@ cuda = "12.0"
 test = "python -m pytest"
 train-surrogate = "python experiments/train_surrogate.py"
 train-decoder = "python experiments/train_decoder.py"
-train-reconstructor = "python experiments/train_reconstructor.py"
+train-decoder-scatter = "python experiments/train_decoder_soft_scatter.py"
 
 [dependencies]
 python = ">=3.14.4,<3.15"

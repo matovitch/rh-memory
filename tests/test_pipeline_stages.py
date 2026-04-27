@@ -9,19 +9,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from rh_memory.pipeline import (
-    DecoderInferenceSample,
     HarmonicSample,
     PipelineConfig,
     SurrogateInferenceSample,
-    decoder_stage,
     harmonic_stage,
     iter_take,
-    reconstructor_training_adapter,
     surrogate_stage,
     surrogate_training_adapter,
 )
 from rh_memory.pipeline.primitives_tokens import reshape_permuted_to_bucket_tokens
-from rh_memory.decoder import RHDecoder
 from rh_memory.surrogate import RHSurrogate
 
 
@@ -38,20 +34,6 @@ def _surrogate(n: int, C: int):
     )
     surrogate.eval()
     return surrogate
-
-
-def _decoder(n: int, C: int):
-    decoder = RHDecoder(
-        sequence_length=n,
-        bucket_count=C,
-        d_model=64,
-        n_heads=4,
-        num_layers=1,
-        dim_feedforward=128,
-    )
-    decoder.eval()
-    return decoder
-
 
 def test_pipeline_stage_shapes():
     n, C, B = 32, 8, 2
@@ -75,17 +57,6 @@ def test_pipeline_stage_shapes():
     assert s1.surrogate_logits.shape == (B, C, n)
     assert s1.decoder_tokens.shape == (B, C, 3)
 
-    decoder = _decoder(n, C)
-    s2 = next(decoder_stage(iter([s1]), decoder=decoder))
-    assert isinstance(s2, DecoderInferenceSample)
-    assert s2.raw_inputs.shape == (B, n)
-    assert s2.reconstructor_tokens.shape == (B, C, 3)
-
-    s2_hard = next(decoder_stage(iter([s1]), decoder=decoder, token_mode="hard"))
-    assert isinstance(s2_hard, DecoderInferenceSample)
-    assert s2_hard.raw_inputs.shape == (B, n)
-    assert s2_hard.reconstructor_tokens.shape == (B, C, 3)
-
 
 def test_pipeline_adapters_shapes():
     n, C, B = 32, 8, 2
@@ -100,18 +71,6 @@ def test_pipeline_adapters_shapes():
     assert s_batch[1].shape == (B, C)
     assert s_batch[2].shape == (B, C)
     assert s_batch[3].shape == (B, C)
-
-    base2 = harmonic_stage(
-        config=config,
-        device="cpu",
-    )
-    decoder = _decoder(n, C)
-    sur2 = surrogate_stage(base2, config=config, surrogate=surrogate)
-    dec2 = decoder_stage(sur2, decoder=decoder)
-    r_batch = next(reconstructor_training_adapter(dec2))
-    assert r_batch[0].shape == (B, C, 3)
-    assert r_batch[1].shape == (B, n)
-
 
 def test_surrogate_training_adapter_keeps_sample_x_perm_read_only():
     n, C, B = 32, 8, 2

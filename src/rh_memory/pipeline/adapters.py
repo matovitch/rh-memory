@@ -11,7 +11,7 @@ from rh_memory.pooling_utils import lpap_pool
 from .config import PipelineConfig
 from .primitives_targets import surrogate_teacher_bucket_slot_indices
 from .primitives_tokens import reshape_permuted_to_bucket_tokens
-from .types import DecoderInferenceSample, HarmonicSample, SurrogateInferenceSample
+from .types import HarmonicSample, SurrogateInferenceSample
 
 
 def surrogate_training_adapter(
@@ -57,10 +57,3 @@ def surrogate_training_adapter(
         target_idx, valid_bucket = surrogate_teacher_bucket_slot_indices(out_slot_id, config.n)
         weights = weights * valid_bucket.float()
         yield bucket_input, target_idx, valid_bucket, weights
-
-
-def reconstructor_training_adapter(
-    stream: Iterable[DecoderInferenceSample],
-) -> Iterator[tuple[Float[Tensor, "B C 3"], Float[Tensor, "B N"]]]:
-    for sample in stream:
-        yield sample.reconstructor_tokens, sample.raw_inputs

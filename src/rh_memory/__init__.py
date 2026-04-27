@@ -4,7 +4,7 @@ from ._python_ops import python_linear_probing_amplitude_pooling
 from ._triton_ops import triton_linear_probing_amplitude_pooling
 from .pooling_utils import lpap_pool
 from .decoder import RHDecoder, RHDecoderDistillationLoss
-from .reconstructor import RHReconstructor, RHReconstructorLoss
+from .decoder_scatter import SoftScatterReconstructionHead, decoder_soft_scatter
 
 __all__ = [
     "python_linear_probing_amplitude_pooling",
@@ -12,6 +12,6 @@ __all__ = [
     "lpap_pool",
     "RHDecoder",
     "RHDecoderDistillationLoss",
-    "RHReconstructor",
-    "RHReconstructorLoss",
+    "SoftScatterReconstructionHead",
+    "decoder_soft_scatter",
 ]

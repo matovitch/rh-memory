@@ -24,11 +24,3 @@ class SurrogateInferenceSample:
     x_perm: Float[Tensor, "B N"]
     surrogate_logits: Float[Tensor, "B C N"]
     decoder_tokens: Float[Tensor, "B C 3"]
-
-
-@dataclass(frozen=True)
-class DecoderInferenceSample:
-    """Output contract for decoder-derived reconstructor features."""
-
-    raw_inputs: Float[Tensor, "B N"]  # unpermuted
-    reconstructor_tokens: Float[Tensor, "B C 3"]

@@ -72,7 +72,7 @@ Scope:
 - LPAP targets do not enter decoder training.
 - No discrete target selection is used.
 
-## Stage 3: Decoder Soft-Scatter L2 Objective
+## Stage 3: Decoder Soft-Scatter L1 Objective
 
 Model:
 
@@ -97,7 +97,9 @@ Target:
 
 Loss:
 
-- MSE over `[B, N]`.
+- Mean absolute error over `[B, N]`.
+- The relative reconstruction metric uses L1 magnitude: `sum(abs(pred - target)) / sum(abs(target))`.
+- The retained-energy diagnostic uses L1 magnitude mass: `sum(abs(pred)) / sum(abs(target))`.
 
 Training setup:
 
@@ -108,8 +110,8 @@ Training setup:
 
 Metric used in script:
 
-- relative L2 percent, retained energy, cosine, decoder doubt, and effective support.
+- relative L1 percent, retained L1 energy, cosine, decoder doubt, and effective support.
 
 Soft-bridge note:
 
-- LPAP targets do not enter decoder L2 fine-tuning. The active reconstruction bridge uses full softmax scatter over all decoder slots, not expected-coordinate reduction and not hard argmax.
+- LPAP targets do not enter decoder L1 fine-tuning. The active reconstruction bridge uses full softmax scatter over all decoder slots, not expected-coordinate reduction and not hard argmax.

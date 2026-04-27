@@ -72,4 +72,4 @@ Architecture behavior:
 
 Loss module:
 
-- The training script uses plain MSE between soft-scattered reconstruction and `raw_inputs`.
+- The training script uses plain mean absolute error between soft-scattered reconstruction and `raw_inputs`.

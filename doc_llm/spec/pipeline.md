@@ -52,7 +52,7 @@ Soft decoder-token construction:
 
 ### Decoder soft-scatter reconstruction
 
-Decoder L2 fine-tuning does not use a learned sequence reconstruction stage. It consumes `SurrogateInferenceSample`, runs `RHDecoder` on `decoder_tokens`, and reconstructs directly with `decoder_soft_scatter(...)`:
+Decoder L1 fine-tuning does not use a learned sequence reconstruction stage. It consumes `SurrogateInferenceSample`, runs `RHDecoder` on `decoder_tokens`, and reconstructs directly with `decoder_soft_scatter(...)`:
 
 1. `decoder_logits = decoder(decoder_tokens)` with shape `[B, C, N]`
 2. `probs = softmax(decoder_logits / temperature, dim=-1)`

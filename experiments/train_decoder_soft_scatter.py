@@ -1,4 +1,4 @@
-"""Fine-tune a pretrained RHDecoder through a differentiable soft-scatter L2 head."""
+"""Fine-tune a pretrained RHDecoder through a differentiable soft-scatter L1 head."""
 
 from __future__ import annotations
 
@@ -25,15 +25,15 @@ from rh_memory.pipeline import (
 )
 
 
-def relative_l2_percent(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
-    err = torch.linalg.vector_norm(pred - target, ord=2, dim=1)
-    den = torch.linalg.vector_norm(target, ord=2, dim=1).clamp_min(eps)
+def relative_l1_percent(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
+    err = (pred - target).abs().sum(dim=1)
+    den = target.abs().sum(dim=1).clamp_min(eps)
     return ((err / den).mean().item()) * 100.0
 
 
-def retained_energy_ratio(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> float:
-    pred_energy = pred.square().sum(dim=1)
-    target_energy = target.square().sum(dim=1).clamp_min(eps)
+def retained_l1_energy_ratio(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> float:
+    pred_energy = pred.abs().sum(dim=1)
+    target_energy = target.abs().sum(dim=1).clamp_min(eps)
     return (pred_energy / target_energy).mean().item()
 
 
@@ -91,9 +91,9 @@ def load_pretrained_decoder(checkpoint_path: Path, device: torch.device):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Fine-tune RHDecoder by soft-scatter L2 reconstruction.")
-    p.add_argument("--surrogate-checkpoint", type=Path, default=Path("experiments/surrogate_ce_checkpoint.pt"))
-    p.add_argument("--decoder-checkpoint", type=Path, default=Path("experiments/decoder_soft_distill_checkpoint.pt"))
+    p = argparse.ArgumentParser(description="Fine-tune RHDecoder by soft-scatter L1 reconstruction.")
+    p.add_argument("--surrogate-checkpoint", type=Path, default=Path("experiments/checkpoints/surrogate_ce_checkpoint.pt"))
+    p.add_argument("--decoder-checkpoint", type=Path, default=Path("experiments/checkpoints/decoder_soft_distill_checkpoint.pt"))
     p.add_argument("--n", type=int, default=None, help="Override sequence length (default: from surrogate meta)")
     p.add_argument("--C", type=int, default=None, help="Override bucket count (default: from surrogate meta)")
     p.add_argument("--batch-size", type=int, default=32)
@@ -104,7 +104,7 @@ def parse_args():
     p.add_argument("--total-steps", type=int, default=50_000_000 // 128)
     p.add_argument("--eval-every", type=int, default=50_000 // 128)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--checkpoint", type=Path, default=Path("experiments/decoder_soft_scatter_l2_checkpoint.pt"))
+    p.add_argument("--checkpoint", type=Path, default=Path("experiments/checkpoints/decoder_soft_scatter_l1_checkpoint.pt"))
     return p.parse_args()
 
 
@@ -160,7 +160,7 @@ def main():
     if args.checkpoint.exists():
         print(f"Loading checkpoint from {args.checkpoint}...")
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        if ckpt.get("version") != "v1_decoder_soft_scatter_l2":
+        if ckpt.get("version") != "v1_decoder_soft_scatter_l1":
             raise ValueError(
                 f"Unsupported decoder soft-scatter checkpoint version {ckpt.get('version')!r}; "
                 "choose a new --checkpoint path."
@@ -188,7 +188,7 @@ def main():
     decoder.train()
     scatter_head.train()
     running_loss = 0.0
-    running_rel_l2 = 0.0
+    running_rel_l1 = 0.0
     batches_since_eval = 0
 
     train_stream = make_train_stream()
@@ -205,22 +205,22 @@ def main():
         optimizer.zero_grad()
         decoder_logits = decoder(decoder_tokens)[:, : config.C, : config.n]
         pred, _probs, _doubt, _support, _temperature = scatter_head(decoder_logits, bucket_amplitude, perm_1d)
-        loss = F.mse_loss(pred, target_series)
+        loss = F.l1_loss(pred, target_series)
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
-        running_rel_l2 += relative_l2_percent(pred.detach(), target_series.detach())
+        running_rel_l1 += relative_l1_percent(pred.detach(), target_series.detach())
         batches_since_eval += 1
 
         if step % args.eval_every == 0 or step == 1:
             avg_train = running_loss / batches_since_eval
-            avg_train_rel_l2 = running_rel_l2 / batches_since_eval
+            avg_train_rel_l1 = running_rel_l1 / batches_since_eval
 
             decoder.eval()
             scatter_head.eval()
             test_loss = 0.0
-            test_rel_l2 = 0.0
+            test_rel_l1 = 0.0
             test_energy = 0.0
             test_cos = 0.0
             test_doubt = 0.0
@@ -237,10 +237,10 @@ def main():
                         decoder_tokens_t[..., 0],
                         perm_1d_t,
                     )
-                    tl = F.mse_loss(pred_t, target_t)
+                    tl = F.l1_loss(pred_t, target_t)
                     test_loss += tl.item()
-                    test_rel_l2 += relative_l2_percent(pred_t, target_t)
-                    test_energy += retained_energy_ratio(pred_t, target_t)
+                    test_rel_l1 += relative_l1_percent(pred_t, target_t)
+                    test_energy += retained_l1_energy_ratio(pred_t, target_t)
                     test_cos += cosine_similarity(pred_t, target_t)
                     test_doubt += doubt_t.mean().item()
                     test_support += support_t.mean().item()
@@ -249,17 +249,18 @@ def main():
             denom = max(test_batches, 1)
             temperature_value = scatter_head.temperature().item()
             print(
-                f"Step {step} | Train MSE: {avg_train:.6f} | Train RelL2: {avg_train_rel_l2:.2f}% | "
-                f"Test MSE: {test_loss / denom:.6f} | Test RelL2: {test_rel_l2 / denom:.2f}% | "
-                f"Energy: {test_energy / denom:.4f} | Cos: {test_cos / denom:.4f} | "
+                f"Step {step} | Train L1: {avg_train:.6f} | Train RelL1: {avg_train_rel_l1:.2f}% | "
+                f"Test L1: {test_loss / denom:.6f} | Test RelL1: {test_rel_l1 / denom:.2f}% | "
+                f"L1Energy: {test_energy / denom:.4f} | Cos: {test_cos / denom:.4f} | "
                 f"Doubt: {test_doubt / denom:.4f} | EffSupport: {test_support / denom:.1f}/{config.n} | "
                 f"ScatterTemp: {temperature_value:.4f}"
             )
 
+            args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
-                    "version": "v1_decoder_soft_scatter_l2",
-                    "checkpoint_role": "decoder_soft_scatter_l2",
+                    "version": "v1_decoder_soft_scatter_l1",
+                    "checkpoint_role": "decoder_soft_scatter_l1",
                     "source_script": "experiments/train_decoder_soft_scatter.py",
                     "step": step,
                     "model_state_dict": decoder.state_dict(),
@@ -274,7 +275,7 @@ def main():
                     "init_scatter_temperature": args.init_scatter_temperature,
                     "min_scatter_temperature": args.min_scatter_temperature,
                     "scatter_temperature": temperature_value,
-                    "loss": "mse",
+                    "loss": "l1",
                     "lr": args.lr,
                     "seed": args.seed,
                 },
@@ -283,7 +284,7 @@ def main():
             print(f"Saved checkpoint to {args.checkpoint}")
 
             running_loss = 0.0
-            running_rel_l2 = 0.0
+            running_rel_l1 = 0.0
             batches_since_eval = 0
             decoder.train()
             scatter_head.train()

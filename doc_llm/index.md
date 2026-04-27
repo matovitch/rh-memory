@@ -4,7 +4,8 @@ Use this page to choose between authoritative implementation contracts and explo
 Read `spec/*` for what runs now, and `notes/*` for where the architecture is heading.
 
 Terminology:
-- **energy space**: representation regime where magnitude and L2-energy semantics are meaningful.
+
+- **energy space**: representation regime where absolute magnitude/L1-energy semantics are meaningful.
 - **compressed space**: bottleneck-side LPAP representation controlled by `C` (detail/compression tradeoff).
 
 ## Current Ground Truth (Spec)

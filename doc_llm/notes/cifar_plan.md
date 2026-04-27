@@ -8,7 +8,7 @@ Canonical current behavior is documented in `doc_llm/spec/*`.
 
 - Domain: grayscale CIFAR flattened to `N=1024`.
 - Objective trend: flow/generator path to produce LPAP-compatible signals, then train with surrogate/decoder soft-scatter stages.
-- Optional endpoint boundary condition: match L2 norm of generated series endpoint to source image norm.
+- Optional endpoint boundary condition: match L1 norm of generated series endpoint to source image norm.
 
 ## LoD-Oriented Multi-C Surrogate Idea
 

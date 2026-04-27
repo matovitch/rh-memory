@@ -107,7 +107,7 @@ def test_soft_scatter_head_allows_gradient_flow_to_logits_and_temperature():
     perm_1d = torch.arange(n)
 
     reconstruction, _probs, doubt, support, temperature = head(logits, amplitudes, perm_1d)
-    loss = F.mse_loss(reconstruction, target) + doubt.mean() + support.mean() * 1e-3 + temperature * 1e-3
+    loss = F.l1_loss(reconstruction, target) + doubt.mean() + support.mean() * 1e-3 + temperature * 1e-3
     loss.backward()
 
     assert reconstruction.shape == (B, n)

@@ -3,13 +3,15 @@
 This page is intentionally non-normative. It records conceptual framing and research intuition.
 
 For executable contracts, use:
+
 - `doc_llm/spec/models.md`
 - `doc_llm/spec/pipeline.md`
 - `doc_llm/spec/objectives.md`
 - `doc_llm/spec/pooling.md`
 
 Terminology used in notes:
-- **energy space**: input/output representation regime where magnitude and L2-energy interpretation are meaningful.
+
+- **energy space**: input/output representation regime where absolute magnitude/L1-energy interpretation is meaningful.
 - **compressed space**: LPAP bottleneck-side representation determined by `C` and routing dynamics.
 
 ## High-Level Framing
@@ -24,7 +26,7 @@ Terminology used in notes:
 - The immediate objective is to discover a useful energy-space geometry that can later be integrated into a neural memory design.
 - Peak-like harmonic signals act as a bootstrap prior for that energy space; the representation is expected to evolve under end-to-end task training plus regularizers.
 - An LPAP-alignment regularizer is intended to keep surrogate behavior close to the operator semantics as training evolves.
-- An L2 reconstruction anchor keeps the autoencoder stack grounded while the energy-space representation adapts to downstream tasks.
+- An L1 reconstruction anchor keeps the autoencoder stack grounded while matching the magnitude-ranked LPAP semantics more directly than squared error.
 
 ## Design Intuition (Not Guarantees)
 

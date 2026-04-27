@@ -75,7 +75,7 @@ def average_doubt(logits: torch.Tensor, temperature: float) -> float:
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train RHDecoder by soft distillation from a frozen RHSurrogate.")
-    p.add_argument("--surrogate-checkpoint", type=Path, default=Path("experiments/surrogate_ce_checkpoint.pt"))
+    p.add_argument("--surrogate-checkpoint", type=Path, default=Path("experiments/checkpoints/surrogate_ce_checkpoint.pt"))
     p.add_argument("--n", type=int, default=None, help="Override sequence length (default: from surrogate meta)")
     p.add_argument("--C", type=int, default=None, help="Override bucket count (default: from surrogate meta)")
     p.add_argument("--batch-size", type=int, default=32)
@@ -88,7 +88,7 @@ def parse_args():
     p.add_argument("--total-steps", type=int, default=50_000_000 // 128)
     p.add_argument("--eval-every", type=int, default=50_000 // 128)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--checkpoint", type=Path, default=Path("experiments/decoder_soft_distill_checkpoint.pt"))
+    p.add_argument("--checkpoint", type=Path, default=Path("experiments/checkpoints/decoder_soft_distill_checkpoint.pt"))
     return p.parse_args()
 
 
@@ -228,6 +228,7 @@ def main():
                 f"Teacher Doubt: {avg_teacher_doubt:.4f} | Decoder Doubt: {avg_decoder_doubt:.4f}"
             )
 
+            args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
                     "version": "v1_soft_decoder_distill",

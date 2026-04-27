@@ -1,7 +1,7 @@
 # RH-Memory Spec Index
 
 This directory is the authoritative, code-aligned specification for current behavior.
-It captures the current surrogate/decoder/soft-scatter baseline and losses as implemented today.
+It captures the current surrogate/decoder/soft-scatter pipeline and losses as implemented today.
 
 Scope rules:
 

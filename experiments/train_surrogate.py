@@ -53,7 +53,7 @@ def parse_args():
     p.add_argument("--eval-every", type=int, default=50_000 // 128)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--fast-k", type=float, default=5.0)
-    p.add_argument("--checkpoint", type=Path, default=Path("experiments/surrogate_ce_checkpoint.pt"))
+    p.add_argument("--checkpoint", type=Path, default=Path("experiments/checkpoints/surrogate_ce_checkpoint.pt"))
     return p.parse_args()
 
 
@@ -174,6 +174,7 @@ def main():
                 f"Test Loss: {avg_test:.6f} | Test Acc: {avg_test_acc:.2f}%"
             )
 
+            args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
                     "version": "v2_ce_no_decoder",

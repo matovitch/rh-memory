@@ -2,10 +2,12 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rh_memory.decoder import RHDecoder, RHDecoderDistillationLoss
+from rh_memory.decoder_scatter import SoftScatterReconstructionHead, decoder_soft_scatter
 
 
 def test_decoder_forward_shape():
@@ -68,3 +70,48 @@ def test_decoder_distillation_loss_handles_zero_weights():
     loss = RHDecoderDistillationLoss()(decoder_logits, teacher_logits, weights)
     assert torch.isfinite(loss)
     assert loss.item() == 0.0
+
+
+def test_decoder_soft_scatter_uniform_identity_permutation():
+    B, C, n = 2, 3, 6
+    logits = torch.zeros(B, C, n)
+    amplitudes = torch.ones(B, C)
+    perm_1d = torch.arange(n)
+
+    reconstruction, probs = decoder_soft_scatter(logits, amplitudes, perm_1d, temperature=1.0)
+
+    assert probs.shape == (B, C, n)
+    assert reconstruction.shape == (B, n)
+    assert torch.allclose(reconstruction, torch.full((B, n), C / n))
+
+
+def test_decoder_soft_scatter_uses_permutation():
+    B, C, n = 1, 2, 4
+    logits = torch.full((B, C, n), -20.0)
+    logits[0, 0, 1] = 20.0
+    logits[0, 1, 3] = 20.0
+    amplitudes = torch.tensor([[2.0, 3.0]])
+    perm_1d = torch.tensor([2, 0, 3, 1])
+
+    reconstruction, _probs = decoder_soft_scatter(logits, amplitudes, perm_1d, temperature=1.0)
+
+    assert torch.allclose(reconstruction, torch.tensor([[2.0, 3.0, 0.0, 0.0]]), atol=1e-5)
+
+
+def test_soft_scatter_head_allows_gradient_flow_to_logits_and_temperature():
+    B, C, n = 2, 3, 8
+    head = SoftScatterReconstructionHead(init_temperature=1.0, min_temperature=0.05)
+    logits = torch.randn(B, C, n, requires_grad=True)
+    amplitudes = torch.randn(B, C)
+    target = torch.randn(B, n)
+    perm_1d = torch.arange(n)
+
+    reconstruction, _probs, doubt, support, temperature = head(logits, amplitudes, perm_1d)
+    loss = F.mse_loss(reconstruction, target) + doubt.mean() + support.mean() * 1e-3 + temperature * 1e-3
+    loss.backward()
+
+    assert reconstruction.shape == (B, n)
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
+    assert head.raw_temperature.grad is not None
+    assert torch.isfinite(head.raw_temperature.grad).all()

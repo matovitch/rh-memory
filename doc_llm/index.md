@@ -21,7 +21,7 @@ These pages are code-aligned and normative.
 ## Research Notes / Directions
 
 - [notes/philosophy.md](notes/philosophy.md)
-- [notes/cifar_plan.md](notes/cifar_plan.md)
+- [notes/image_energy_flow_plan.md](notes/image_energy_flow_plan.md)
 - [notes/synthetic_signals.md](notes/synthetic_signals.md)
 - [notes/memory_roadmap.md](notes/memory_roadmap.md)
 

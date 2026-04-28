@@ -14,6 +14,9 @@ test = "python -m pytest"
 train-surrogate = "python experiments/train_surrogate.py"
 train-decoder = "python experiments/train_decoder.py"
 train-decoder-scatter = "python experiments/train_decoder_soft_scatter.py"
+prepare-grayscale-data = "python experiments/prepare_grayscale_dataset.py"
+train-flow-symmetric = "python experiments/train_flow_symmetric.py"
+eval-flow-distributions = "python experiments/eval_flow_distributions.py"
 
 [dependencies]
 python = ">=3.14.4,<3.15"

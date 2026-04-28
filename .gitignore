@@ -7,6 +7,9 @@
 __pycache__/
 .rattler_cache/
 
+# data
+data/
+
 # Pytorch artifacts
 *.pt
 *.pth

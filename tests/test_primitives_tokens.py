@@ -1,13 +1,7 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 import torch
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 from rh_memory.pipeline.primitives_tokens import (
     decoder_tokens_from_surrogate_logits_soft,

@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Bool, Float
 from torch import Tensor
+from typing import cast
 
 
 class RotaryEmbedding(nn.Module):
@@ -18,7 +19,7 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq)
 
     def forward(self, seq_len: int, device: torch.device) -> tuple[Float[Tensor, "seq_len head_dim"], Float[Tensor, "seq_len head_dim"]]:
-        inv_freq = self.inv_freq
+        inv_freq = cast(Tensor, self.inv_freq)
         t = torch.arange(seq_len, device=device).to(dtype=inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
@@ -103,7 +104,7 @@ class MultiheadAttentionCore(nn.Module):
         q_len = q.shape[2]
         kv_len = k.shape[2]
 
-        if self.use_rope:
+        if self.rotary_emb is not None:
             if q_len != kv_len:
                 raise ValueError("RoPE requires q_len == kv_len")
             cos, sin = self.rotary_emb(q_len, x_q.device)

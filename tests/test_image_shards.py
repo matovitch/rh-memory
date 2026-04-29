@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import io
-import sys
 import tarfile
-from pathlib import Path
 
 import torch
 from PIL import Image
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rh_memory.image_shards import (
     GrayscaleImageShardDataset,

@@ -11,7 +11,7 @@ from rh_memory.pooling_utils import lpap_pool
 from .config import PipelineConfig
 from .primitives_targets import surrogate_teacher_bucket_slot_indices
 from .primitives_tokens import reshape_permuted_to_bucket_tokens
-from .types import HarmonicSample, SurrogateInferenceSample
+from .types import HarmonicSample
 
 
 def surrogate_training_adapter(

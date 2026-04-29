@@ -1,10 +1,5 @@
-import sys
-from pathlib import Path
-
 import pytest
 import torch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rh_memory.transformer_core import MultiheadAttentionCore, TransformerCrossBlock
 

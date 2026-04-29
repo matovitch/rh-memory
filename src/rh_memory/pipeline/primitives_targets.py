@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import torch
 from jaxtyping import Bool, Int
 from torch import Tensor
 

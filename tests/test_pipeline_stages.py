@@ -1,12 +1,6 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import torch
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 from rh_memory.pipeline import (
     HarmonicSample,
@@ -61,7 +55,6 @@ def test_pipeline_stage_shapes():
 def test_pipeline_adapters_shapes():
     n, C, B = 32, 8, 2
     config = PipelineConfig(n=n, C=C, batch_size=B, seed=11, fast_k=1.0, max_harmonics=8)
-    surrogate = _surrogate(n, C)
     base = harmonic_stage(
         config=config,
         device="cpu",

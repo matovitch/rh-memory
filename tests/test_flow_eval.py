@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import torch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rh_memory.flow_eval import distribution_delta, distribution_stats, parse_step_counts
 

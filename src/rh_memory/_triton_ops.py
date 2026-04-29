@@ -44,13 +44,11 @@ def _linear_probing_amplitude_pool_kernel(
         inc_mask = r_mask[:, None] & c_mask[None, :]
 
         inc_vals = tl.load(inc_vals_ptr + inc_offsets, mask=inc_mask, other=0.0)
-        inc_carry = tl.load(inc_carry_id_ptr + inc_offsets, mask=inc_mask, other=-1)
-        inc_base_dib = tl.load(inc_dib_ptr + inc_offsets, mask=inc_mask, other=0)
 
         inc_vals_abs = tl.abs(inc_vals)
         # padded stride lanes: -1.0 so they never win tl.max over axis=0
         inc_for_max = tl.where(inc_mask, inc_vals_abs, -1.0)
-        _, max_r_indices = tl.max(inc_for_max, axis=0, return_indices=True)  # type: ignore
+        _, max_r_indices = tl.max(inc_for_max, axis=0, return_indices=True)  # type: ignore  # pyright: ignore[reportGeneralTypeIssues]
 
         winner_in_c_offsets = (c_offsets - step % C + C) % C
         winner_inc_offsets = inc_base_offset + max_r_indices * C + winner_in_c_offsets
@@ -144,7 +142,7 @@ def triton_linear_probing_amplitude_pooling(
         k,
         BLOCK_SIZE_C=BLOCK_SIZE_C,
         BLOCK_SIZE_STRIDE=BLOCK_SIZE_STRIDE,
-        num_warps=4,
+        num_warps=4,  # pyright: ignore[reportCallIssue]
     )
 
     if need_vals_copy:

@@ -63,7 +63,7 @@ def iter_image_shards(
         yield images
 
 
-class GrayscaleImageShardDataset(torch.utils.data.Dataset):
+class GrayscaleImageShardDataset(torch.utils.data.Dataset[torch.Tensor]):
     """Lazy map-style dataset backed by grayscale image shard files."""
 
     def __init__(self, manifest_path: str | Path, *, as_float: bool = False) -> None:
@@ -106,7 +106,7 @@ class GrayscaleImageShardDataset(torch.utils.data.Dataset):
         return self._cached_images
 
 
-class InMemoryGrayscaleImageShardDataset(torch.utils.data.Dataset):
+class InMemoryGrayscaleImageShardDataset(torch.utils.data.Dataset[torch.Tensor]):
     """Map-style dataset that preloads all grayscale shards as one uint8 tensor."""
 
     def __init__(self, manifest_path: str | Path, *, as_float: bool = False) -> None:

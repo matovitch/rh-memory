@@ -2,9 +2,9 @@
 
 Normative source:
 
-- `experiments/train_surrogate.py`
-- `experiments/train_decoder.py`
-- `experiments/train_decoder_soft_scatter.py`
+- `scripts/train_surrogate.py`
+- `scripts/train_decoder.py`
+- `scripts/train_decoder_soft_scatter.py`
 - `src/rh_memory/pipeline/adapters.py`
 - `src/rh_memory/pipeline/primitives_targets.py`
 - `src/rh_memory/pipeline/primitives_tokens.py`

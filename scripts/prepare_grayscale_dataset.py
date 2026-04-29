@@ -3,11 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
-
-_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT / "src"))
 
 from rh_memory.image_shards import convert_png_tar_to_grayscale_shards
 

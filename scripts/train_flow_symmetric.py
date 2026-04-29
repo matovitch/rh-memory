@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import argparse
 import itertools
-import sys
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
-
-_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT / "src"))
 
 from rh_memory.decoder import RHDecoder
 from rh_memory.decoder_scatter import SoftScatterReconstructionHead
@@ -22,6 +18,7 @@ from rh_memory.hilbert import hilbert_flatten_images, hilbert_metadata
 from rh_memory.image_shards import GrayscaleImageShardDataset, InMemoryGrayscaleImageShardDataset
 from rh_memory.pipeline import PipelineConfig, harmonic_stage, surrogate_stage
 from rh_memory.surrogate import RHSurrogate
+from rh_memory.training_seed import apply_training_seed
 
 
 def relative_l2_percent(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
@@ -113,14 +110,14 @@ def parse_dilations(value: str) -> tuple[int, ...]:
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image-manifest", type=Path, default=Path("data/grayscale_32x32_torch/manifest.json"))
-    parser.add_argument("--surrogate-checkpoint", type=Path, default=Path("experiments/checkpoints/surrogate_ce_checkpoint.pt"))
-    parser.add_argument("--soft-scatter-checkpoint", type=Path, default=Path("experiments/checkpoints/decoder_soft_scatter_l1_checkpoint.pt"))
-    parser.add_argument("--checkpoint", type=Path, default=Path("experiments/checkpoints/symmetric_flow_checkpoint.pt"))
+    parser.add_argument("--surrogate-checkpoint", type=Path, default=Path("scripts/checkpoints/surrogate_ce_checkpoint.pt"))
+    parser.add_argument("--soft-scatter-checkpoint", type=Path, default=Path("scripts/checkpoints/decoder_soft_scatter_l1_checkpoint.pt"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("scripts/checkpoints/symmetric_flow_checkpoint.pt"))
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--total-steps", type=int, default=150_000)
+    parser.add_argument("--total-steps", type=int, default=40_000)
     parser.add_argument("--eval-every", type=int, default=500)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--eps", type=float, default=1e-4)
     parser.add_argument("--time-beta-alpha", type=float, default=0.1)
     parser.add_argument("--time-beta-beta", type=float, default=0.1)
@@ -193,9 +190,18 @@ def main():
             f"{args.time_beta_alpha} and {args.time_beta_beta}"
         )
 
-    torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    flow_ckpt = None
+    if args.checkpoint.exists():
+        flow_ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        if flow_ckpt.get("version") != "v1_symmetric_flow_matching":
+            raise ValueError(f"Unsupported flow checkpoint version {flow_ckpt.get('version')!r}")
+
+    training_seed = apply_training_seed(args.seed, flow_ckpt)
+    args.seed = training_seed.seed
+    print(f"Using seed: {training_seed.seed} ({training_seed.source})")
 
     surrogate, surrogate_config = load_surrogate(args.surrogate_checkpoint, device)
     decoder, scatter_head, scatter_config, scatter_ckpt = load_soft_scatter_autoencoder(args.soft_scatter_checkpoint, device)
@@ -215,29 +221,31 @@ def main():
     if config.n != 1024:
         raise ValueError(f"this first flow script expects n=1024 for 32x32 Hilbert images, got {config.n}")
 
-    model_kwargs = dict(
+    image_to_energy_flow = DilatedConvFlow1d(
         sequence_length=config.n,
         width=args.flow_width,
         time_dim=args.time_dim,
         dilation_cycles=args.dilation_cycles,
         dilations=args.dilations,
-    )
-    image_to_energy_flow = DilatedConvFlow1d(**model_kwargs).to(device)
-    energy_to_image_flow = DilatedConvFlow1d(**model_kwargs).to(device)
+    ).to(device)
+    energy_to_image_flow = DilatedConvFlow1d(
+        sequence_length=config.n,
+        width=args.flow_width,
+        time_dim=args.time_dim,
+        dilation_cycles=args.dilation_cycles,
+        dilations=args.dilations,
+    ).to(device)
     optimizer = optim.AdamW(
         itertools.chain(image_to_energy_flow.parameters(), energy_to_image_flow.parameters()),
         lr=args.lr,
     )
 
     start_step = 0
-    if args.checkpoint.exists():
-        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        if ckpt.get("version") != "v1_symmetric_flow_matching":
-            raise ValueError(f"Unsupported flow checkpoint version {ckpt.get('version')!r}")
-        image_to_energy_flow.load_state_dict(ckpt["image_to_energy_state_dict"])
-        energy_to_image_flow.load_state_dict(ckpt["energy_to_image_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        start_step = int(ckpt.get("step", 0))
+    if flow_ckpt is not None:
+        image_to_energy_flow.load_state_dict(flow_ckpt["image_to_energy_state_dict"])
+        energy_to_image_flow.load_state_dict(flow_ckpt["energy_to_image_state_dict"])
+        optimizer.load_state_dict(flow_ckpt["optimizer_state_dict"])
+        start_step = int(flow_ckpt.get("step", 0))
         print(f"Resumed flow checkpoint from step {start_step}")
 
     image_iter = make_image_iterator(args, device)
@@ -314,7 +322,7 @@ def main():
                 {
                     "version": "v1_symmetric_flow_matching",
                     "checkpoint_role": "symmetric_flow_matching",
-                    "source_script": "experiments/train_flow_symmetric.py",
+                    "source_script": "scripts/train_flow_symmetric.py",
                     "step": step,
                     "image_to_energy_state_dict": image_to_energy_flow.state_dict(),
                     "energy_to_image_state_dict": energy_to_image_flow.state_dict(),
@@ -339,6 +347,7 @@ def main():
                     "eps": args.eps,
                     "lr": args.lr,
                     "seed": args.seed,
+                    "seed_source": training_seed.source,
                     "metrics": {
                         "image_to_energy_mse": avg_i2e,
                         "energy_to_image_mse": avg_e2i,

@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-
-_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT / "src"))
 
 from rh_memory.decoder import RHDecoder
 from rh_memory.decoder_scatter import SoftScatterReconstructionHead
@@ -23,6 +19,7 @@ from rh_memory.pipeline import (
     iter_take,
     surrogate_stage,
 )
+from rh_memory.training_seed import apply_training_seed
 
 
 def relative_l1_percent(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
@@ -92,8 +89,8 @@ def load_pretrained_decoder(checkpoint_path: Path, device: torch.device):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Fine-tune RHDecoder by soft-scatter L1 reconstruction.")
-    p.add_argument("--surrogate-checkpoint", type=Path, default=Path("experiments/checkpoints/surrogate_ce_checkpoint.pt"))
-    p.add_argument("--decoder-checkpoint", type=Path, default=Path("experiments/checkpoints/decoder_soft_distill_checkpoint.pt"))
+    p.add_argument("--surrogate-checkpoint", type=Path, default=Path("scripts/checkpoints/surrogate_ce_checkpoint.pt"))
+    p.add_argument("--decoder-checkpoint", type=Path, default=Path("scripts/checkpoints/decoder_soft_distill_checkpoint.pt"))
     p.add_argument("--n", type=int, default=None, help="Override sequence length (default: from surrogate meta)")
     p.add_argument("--C", type=int, default=None, help="Override bucket count (default: from surrogate meta)")
     p.add_argument("--batch-size", type=int, default=32)
@@ -103,16 +100,29 @@ def parse_args():
     p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--total-steps", type=int, default=50_000_000 // 128)
     p.add_argument("--eval-every", type=int, default=50_000 // 128)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--checkpoint", type=Path, default=Path("experiments/checkpoints/decoder_soft_scatter_l1_checkpoint.pt"))
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--checkpoint", type=Path, default=Path("scripts/checkpoints/decoder_soft_scatter_l1_checkpoint.pt"))
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    ckpt = None
+    if args.checkpoint.exists():
+        print(f"Loading checkpoint from {args.checkpoint}...")
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        if ckpt.get("version") != "v1_decoder_soft_scatter_l1":
+            raise ValueError(
+                f"Unsupported decoder soft-scatter checkpoint version {ckpt.get('version')!r}; "
+                "choose a new --checkpoint path."
+            )
+
+    training_seed = apply_training_seed(args.seed, ckpt)
+    args.seed = training_seed.seed
+    print(f"Using seed: {training_seed.seed} ({training_seed.source})")
 
     surrogate, surrogate_config = load_surrogate(args.surrogate_checkpoint, device)
     print(f"Loaded surrogate from {args.surrogate_checkpoint}")
@@ -157,14 +167,7 @@ def main():
     )
 
     start_step = 0
-    if args.checkpoint.exists():
-        print(f"Loading checkpoint from {args.checkpoint}...")
-        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        if ckpt.get("version") != "v1_decoder_soft_scatter_l1":
-            raise ValueError(
-                f"Unsupported decoder soft-scatter checkpoint version {ckpt.get('version')!r}; "
-                "choose a new --checkpoint path."
-            )
+    if ckpt is not None:
         decoder.load_state_dict(ckpt["model_state_dict"])
         scatter_head.load_state_dict(ckpt["scatter_head_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
@@ -261,7 +264,7 @@ def main():
                 {
                     "version": "v1_decoder_soft_scatter_l1",
                     "checkpoint_role": "decoder_soft_scatter_l1",
-                    "source_script": "experiments/train_decoder_soft_scatter.py",
+                    "source_script": "scripts/train_decoder_soft_scatter.py",
                     "step": step,
                     "model_state_dict": decoder.state_dict(),
                     "scatter_head_state_dict": scatter_head.state_dict(),
@@ -278,6 +281,7 @@ def main():
                     "loss": "l1",
                     "lr": args.lr,
                     "seed": args.seed,
+                    "seed_source": training_seed.source,
                 },
                 args.checkpoint,
             )

@@ -1,0 +1,10 @@
+[lint]
+# jaxtyping shape annotations intentionally use strings like "B C N", which
+# Pyflakes otherwise tries to parse as Python forward references.
+ignore = ["F722"]
+
+[lint.per-file-ignores]
+"src/rh_memory/decoder_scatter.py" = ["F821"]
+"src/rh_memory/flow_models.py" = ["F821"]
+"src/rh_memory/pipeline/primitives_permutation.py" = ["F821"]
+"src/rh_memory/pipeline/types.py" = ["F821"]

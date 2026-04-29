@@ -27,7 +27,7 @@ Assumptions:
 
 ## Routing Semantics
 
-- Incoming stream is reshaped to `[B, stride, C]` where `stride = N // C` (in current experiments `N % C == 0` is enforced upstream).
+- Incoming stream is reshaped to `[B, stride, C]` where `stride = N // C` (in current training scripts `N % C == 0` is enforced upstream).
 - Winner selection is by absolute amplitude.
 - Table update uses `>=` against incumbent magnitude.
 - On winner replacement, displaced incumbent is scattered back into pipeline and probe state rolls along bucket axis.

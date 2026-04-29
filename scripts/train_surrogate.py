@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import torch
 import torch.optim as optim
-
-_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT / "src"))
 
 from rh_memory.surrogate import RHSurrogate, RHSurrogateLoss
 
@@ -20,6 +16,7 @@ from rh_memory.pipeline import (
     iter_take,
     surrogate_training_adapter,
 )
+from rh_memory.training_seed import apply_training_seed
 
 
 def bucket_slot_accuracy_percent(
@@ -51,17 +48,25 @@ def parse_args():
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--total-steps", type=int, default=50_000_000 // 128)
     p.add_argument("--eval-every", type=int, default=50_000 // 128)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=None)
     p.add_argument("--fast-k", type=float, default=5.0)
-    p.add_argument("--checkpoint", type=Path, default=Path("experiments/checkpoints/surrogate_ce_checkpoint.pt"))
+    p.add_argument("--checkpoint", type=Path, default=Path("scripts/checkpoints/surrogate_ce_checkpoint.pt"))
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    ckpt = None
+    if args.checkpoint.exists():
+        print(f"Loading checkpoint from {args.checkpoint}...")
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+
+    training_seed = apply_training_seed(args.seed, ckpt)
+    args.seed = training_seed.seed
+    print(f"Using seed: {training_seed.seed} ({training_seed.source})")
 
     config = PipelineConfig(
         n=args.n,
@@ -104,9 +109,7 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 
     start_step = 0
-    if args.checkpoint.exists():
-        print(f"Loading checkpoint from {args.checkpoint}...")
-        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    if ckpt is not None:
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_step = ckpt.get("step", 0)
@@ -179,12 +182,14 @@ def main():
                 {
                     "version": "v2_ce_no_decoder",
                     "checkpoint_role": "surrogate",
-                    "source_script": "experiments/train_surrogate.py",
+                    "source_script": "scripts/train_surrogate.py",
                     "step": step,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "config": config.to_dict(),
                     "model_config": model_config,
+                    "seed": args.seed,
+                    "seed_source": training_seed.source,
                 },
                 args.checkpoint,
             )

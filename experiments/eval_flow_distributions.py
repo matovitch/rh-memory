@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument("--soft-scatter-checkpoint", type=Path, default=None)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num-batches", type=int, default=16)
-    parser.add_argument("--steps", type=parse_step_counts, default=(1, 2, 4, 8, 16, 32, 64))
+    parser.add_argument("--steps", type=parse_step_counts, default=(1, 4, 16, 64, 128))
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--surrogate-temperature", type=float, default=None)
     parser.add_argument("--preload-images", action=argparse.BooleanOptionalAction, default=True)

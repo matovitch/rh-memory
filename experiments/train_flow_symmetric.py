@@ -118,10 +118,12 @@ def parse_args():
     parser.add_argument("--checkpoint", type=Path, default=Path("experiments/checkpoints/symmetric_flow_checkpoint.pt"))
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--total-steps", type=int, default=100_000)
+    parser.add_argument("--total-steps", type=int, default=150_000)
     parser.add_argument("--eval-every", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--eps", type=float, default=1e-4)
+    parser.add_argument("--time-beta-alpha", type=float, default=0.1)
+    parser.add_argument("--time-beta-beta", type=float, default=0.1)
     parser.add_argument("--surrogate-temperature", type=float, default=1.0)
     parser.add_argument("--flow-width", type=int, default=128)
     parser.add_argument("--time-dim", type=int, default=128)
@@ -185,6 +187,11 @@ def main():
     args = parse_args()
     if not (0.0 <= args.eps < 0.5):
         raise ValueError(f"eps must be in [0, 0.5), got {args.eps}")
+    if args.time_beta_alpha <= 0.0 or args.time_beta_beta <= 0.0:
+        raise ValueError(
+            "time-beta-alpha and time-beta-beta must be positive, got "
+            f"{args.time_beta_alpha} and {args.time_beta_beta}"
+        )
 
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -240,13 +247,15 @@ def main():
     running_i2e = 0.0
     running_e2i = 0.0
     running_batches = 0
+    time_dist = torch.distributions.Beta(args.time_beta_alpha, args.time_beta_beta)
 
     for step_idx in range(1, args.total_steps - start_step + 1):
         step = start_step + step_idx
         image_seq = next(image_iter)
         sample = next(surrogate_stream)
         raw_energy_seq, projected_energy_seq = make_energy_batch(sample, decoder, scatter_head, config, args, device)
-        t = args.eps + (1.0 - 2.0 * args.eps) * torch.rand(config.batch_size, device=device)
+        t_unit = time_dist.sample((config.batch_size,)).to(device=device)
+        t = args.eps + (1.0 - 2.0 * args.eps) * t_unit
         s = 1.0 - t
 
         image_to_energy_flow.train()
@@ -322,6 +331,11 @@ def main():
                     "soft_scatter_checkpoint": str(args.soft_scatter_checkpoint),
                     "soft_scatter_checkpoint_version": scatter_ckpt.get("version"),
                     "surrogate_temperature": args.surrogate_temperature,
+                    "time_sampling": {
+                        "distribution": "beta",
+                        "alpha": args.time_beta_alpha,
+                        "beta": args.time_beta_beta,
+                    },
                     "eps": args.eps,
                     "lr": args.lr,
                     "seed": args.seed,

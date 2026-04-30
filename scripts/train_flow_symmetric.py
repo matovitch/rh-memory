@@ -13,8 +13,7 @@ from torch.utils.data import DataLoader
 
 from rh_memory.decoder import RHDecoder
 from rh_memory.decoder_scatter import SoftScatterReconstructionHead
-from rh_memory.flow_matching import flow_matching_loss as flow_loss
-from rh_memory.flow_models import DilatedConvFlow1d
+from rh_memory.flow_models import DilatedConvFlow1d, flow_matching_loss as flow_loss
 from rh_memory.hilbert import hilbert_flatten_images, hilbert_metadata
 from rh_memory.image_shards import GrayscaleImageShardDataset, InMemoryGrayscaleImageShardDataset
 from rh_memory.pipeline import PipelineConfig, harmonic_stage, surrogate_stage

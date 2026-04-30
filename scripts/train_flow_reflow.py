@@ -29,7 +29,7 @@ from train_flow_symmetric import (
 )
 
 from rh_memory.flow_integration import integrate_euler_midpoint_time as integrate_euler
-from rh_memory.flow_matching import flow_matching_loss as reflow_loss
+from rh_memory.flow_models import flow_matching_loss as reflow_loss
 from rh_memory.hilbert import hilbert_metadata
 from rh_memory.pipeline import PipelineConfig, harmonic_stage, surrogate_stage
 from rh_memory.training_seed import apply_training_seed

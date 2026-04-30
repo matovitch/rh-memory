@@ -11,8 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from flow_checkpoints import checkpoint_direction, state_dict_for_direction
 from train_flow_reflow import sample_time
 
-from rh_memory.flow_matching import flow_matching_loss
-from rh_memory.flow_models import DilatedConvFlow1d
+from rh_memory.flow_models import DilatedConvFlow1d, flow_matching_loss
 
 
 def test_sample_time_uniform_range() -> None:

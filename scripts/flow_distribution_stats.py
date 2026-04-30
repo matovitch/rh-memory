@@ -1,4 +1,4 @@
-"""Distribution statistics for flow evaluation."""
+"""Distribution statistics for flow evaluation scripts."""
 
 from __future__ import annotations
 
@@ -24,8 +24,6 @@ def distribution_stats(
     *,
     quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
 ) -> dict[str, float]:
-    """Return unpaired scalar distribution statistics over flattened values."""
-
     flat = x.detach().float().flatten()
     if flat.numel() == 0:
         raise ValueError("cannot compute distribution stats for an empty tensor")
@@ -52,8 +50,6 @@ def concatenate_batches(batches: list[Tensor]) -> Tensor:
 
 
 def distribution_delta(generated: dict[str, float], reference: dict[str, float]) -> dict[str, float]:
-    """Compare generated stats against a reference distribution without pairwise matching."""
-
     reference_l1 = max(abs(reference["l1_per_sample"]), 1e-12)
     return {
         "abs_mean": abs(generated["mean"] - reference["mean"]),

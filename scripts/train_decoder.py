@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 import torch.optim as optim
+from path_utils import project_relative_path, resolve_project_path
 
 from rh_memory.decoder import RHDecoder, RHDecoderDistillationLoss
 from rh_memory.surrogate import RHSurrogate
@@ -22,6 +23,7 @@ from rh_memory.training_seed import apply_training_seed
 
 
 def load_surrogate(checkpoint_path: Path, device: torch.device):
+    checkpoint_path = resolve_project_path(checkpoint_path)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if ckpt.get("version") != "v2_ce_no_decoder":
         raise ValueError(
@@ -93,6 +95,9 @@ def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    args.checkpoint = resolve_project_path(args.checkpoint)
+    args.surrogate_checkpoint = resolve_project_path(args.surrogate_checkpoint)
 
     ckpt = None
     if args.checkpoint.exists():
@@ -242,7 +247,7 @@ def main():
                     "optimizer_state_dict": optimizer.state_dict(),
                     "config": config.to_dict(),
                     "model_config": model_config,
-                    "surrogate_checkpoint": str(args.surrogate_checkpoint),
+                    "surrogate_checkpoint": project_relative_path(args.surrogate_checkpoint),
                     "temperature": args.temperature,
                     "seed": args.seed,
                     "seed_source": training_seed.source,

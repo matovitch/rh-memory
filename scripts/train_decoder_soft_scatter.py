@@ -8,6 +8,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
+from path_utils import project_relative_path, resolve_project_path
 
 from rh_memory.decoder import RHDecoder
 from rh_memory.decoder_scatter import SoftScatterReconstructionHead
@@ -41,6 +42,7 @@ def cosine_similarity(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-
 
 
 def load_surrogate(checkpoint_path: Path, device: torch.device):
+    checkpoint_path = resolve_project_path(checkpoint_path)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if ckpt.get("version") != "v2_ce_no_decoder":
         raise ValueError(
@@ -67,6 +69,7 @@ def load_surrogate(checkpoint_path: Path, device: torch.device):
 
 
 def load_pretrained_decoder(checkpoint_path: Path, device: torch.device):
+    checkpoint_path = resolve_project_path(checkpoint_path)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if ckpt.get("version") != "v1_soft_decoder_distill":
         raise ValueError(
@@ -109,6 +112,10 @@ def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    args.checkpoint = resolve_project_path(args.checkpoint)
+    args.surrogate_checkpoint = resolve_project_path(args.surrogate_checkpoint)
+    args.decoder_checkpoint = resolve_project_path(args.decoder_checkpoint)
 
     ckpt = None
     if args.checkpoint.exists():
@@ -271,8 +278,8 @@ def main():
                     "optimizer_state_dict": optimizer.state_dict(),
                     "config": config.to_dict(),
                     "model_config": model_config,
-                    "surrogate_checkpoint": str(args.surrogate_checkpoint),
-                    "pretrained_decoder_checkpoint": str(args.decoder_checkpoint),
+                    "surrogate_checkpoint": project_relative_path(args.surrogate_checkpoint),
+                    "pretrained_decoder_checkpoint": project_relative_path(args.decoder_checkpoint),
                     "pretrained_decoder_version": decoder_ckpt.get("version"),
                     "surrogate_temperature": args.surrogate_temperature,
                     "init_scatter_temperature": args.init_scatter_temperature,

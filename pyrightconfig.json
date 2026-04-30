@@ -1,6 +1,6 @@
 {
   "include": ["src", "scripts", "tests"],
-  "extraPaths": ["src"],
+  "extraPaths": ["src", "scripts"],
   "venvPath": ".pixi/envs",
   "venv": "default",
   "typeCheckingMode": "standard",

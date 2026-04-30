@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import torch
 
-from rh_memory.flow_eval import distribution_delta, distribution_stats, parse_step_counts
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+from flow_distribution_stats import distribution_delta, distribution_stats, parse_step_counts
 
 
 def test_parse_step_counts() -> None:

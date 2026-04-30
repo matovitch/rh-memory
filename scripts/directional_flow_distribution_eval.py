@@ -1,13 +1,27 @@
-"""Compare symmetric flow endpoint distributions across Euler step counts."""
+"""Shared directional flow distribution evaluation helpers."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import torch
+from flow_checkpoints import (
+    SUPPORTED_FLOW_CHECKPOINT_VERSIONS,
+    build_flow_model,
+    checkpoint_direction,
+    require_flow_checkpoint_keys,
+    state_dict_for_direction,
+)
+from flow_distribution_stats import (
+    concatenate_batches,
+    distribution_delta,
+    distribution_stats,
+    parse_step_counts,
+)
+from path_utils import resolve_project_path
 from torch.utils.data import DataLoader
 from train_flow_symmetric import (
     load_soft_scatter_autoencoder,
@@ -15,13 +29,7 @@ from train_flow_symmetric import (
     make_energy_batch,
 )
 
-from rh_memory.flow_eval import (
-    concatenate_batches,
-    distribution_delta,
-    distribution_stats,
-    parse_step_counts,
-)
-from rh_memory.flow_models import DilatedConvFlow1d
+from rh_memory.flow_integration import integrate_euler_midpoint_time as integrate_euler
 from rh_memory.hilbert import hilbert_flatten_images
 from rh_memory.image_shards import (
     GrayscaleImageShardDataset,
@@ -30,12 +38,14 @@ from rh_memory.image_shards import (
 from rh_memory.pipeline import PipelineConfig, harmonic_stage, surrogate_stage
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description=__doc__)
+Direction = Literal["image-to-energy", "energy-to-image"]
+
+def parse_args(*, default_checkpoint: Path, fixed_direction: Direction):
+    parser = argparse.ArgumentParser(description="Evaluate directional flow endpoint distributions.")
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path("scripts/checkpoints/symmetric_flow_checkpoint.pt"),
+        default=default_checkpoint,
     )
     parser.add_argument(
         "--image-manifest",
@@ -49,41 +59,21 @@ def parse_args():
     parser.add_argument("--steps", type=parse_step_counts, default=(1, 4, 16, 64, 128))
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--surrogate-temperature", type=float, default=None)
-    parser.add_argument(
-        "--preload-images", action=argparse.BooleanOptionalAction, default=True
-    )
+    parser.add_argument("--preload-images", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--num-workers", type=int, default=0)
-    return parser.parse_args()
-
-
-def build_flow_model(
-    config: dict[str, Any], state_dict: dict[str, torch.Tensor], device: torch.device
-) -> DilatedConvFlow1d:
-    model = DilatedConvFlow1d(
-        sequence_length=int(config["sequence_length"]),
-        width=int(config["width"]),
-        time_dim=int(config["time_dim"]),
-        dilation_cycles=int(config["dilation_cycles"]),
-        dilations=tuple(int(dilation) for dilation in config["dilations"]),
-        kernel_size=int(config.get("kernel_size", 3)),
-    ).to(device)
-    model.load_state_dict(state_dict)
-    model.eval()
-    return model
+    args = parser.parse_args()
+    args.direction = fixed_direction
+    return args
 
 
 def make_image_iterator(args, device: torch.device, image_scale: float, seed: int):
     generator = torch.Generator().manual_seed(seed)
     if args.preload_images:
         if args.num_workers != 0:
-            raise ValueError(
-                "--preload-images should use --num-workers 0 to avoid duplicating the in-memory dataset"
-            )
+            raise ValueError("--preload-images should use --num-workers 0 to avoid duplicating the in-memory dataset")
         print(f"Preloading image shards into RAM from {args.image_manifest}...")
         dataset = InMemoryGrayscaleImageShardDataset(args.image_manifest, as_float=True)
-        print(
-            f"Preloaded {len(dataset)} images as uint8 ({dataset.images.numel() / 1024**3:.2f} GiB)"
-        )
+        print(f"Preloaded {len(dataset)} images as uint8 ({dataset.images.numel() / 1024**3:.2f} GiB)")
     else:
         dataset = GrayscaleImageShardDataset(args.image_manifest, as_float=True)
     loader = DataLoader(
@@ -97,18 +87,6 @@ def make_image_iterator(args, device: torch.device, image_scale: float, seed: in
     while True:
         for images in loader:
             yield hilbert_flatten_images(images.to(device)).mul(image_scale)
-
-
-@torch.no_grad()
-def integrate_euler(model, start: torch.Tensor, *, steps: int) -> torch.Tensor:
-    x = start
-    dt = 1.0 / steps
-    for step in range(steps):
-        t = torch.full(
-            (start.shape[0],), (step + 0.5) * dt, device=start.device, dtype=start.dtype
-        )
-        x = x + dt * model(x, t)
-    return x
 
 
 def format_stats(stats: dict[str, float]) -> str:
@@ -127,17 +105,45 @@ def format_delta(delta: dict[str, float]) -> str:
     )
 
 
-def main():
-    args = parse_args()
+def print_checkpoint_header(args, flow_ckpt: dict[str, Any], device: torch.device) -> None:
+    print(f"Using device: {device}")
+    print(f"Flow checkpoint: {args.checkpoint} (step {flow_ckpt.get('step', 'unknown')})")
+    print(f"Checkpoint version: {flow_ckpt.get('version', 'unknown')}")
+    print(f"Checkpoint role: {flow_ckpt.get('checkpoint_role', 'unknown')}")
+    ckpt_direction = checkpoint_direction(flow_ckpt)
+    if ckpt_direction is not None:
+        print(f"Checkpoint direction: {ckpt_direction}")
+    if flow_ckpt.get("version") == "v1_directional_flow_reflow":
+        print(f"Teacher checkpoint: {flow_ckpt.get('teacher_checkpoint', 'unknown')}")
+        print(f"Teacher steps: {flow_ckpt.get('teacher_steps', 'unknown')}")
+        if "time_sampling" in flow_ckpt:
+            print(f"Time sampling: {flow_ckpt['time_sampling']}")
+    print(f"Evaluated direction: {args.direction}")
+    print(f"Euler steps: {','.join(str(step) for step in args.steps)}")
+
+
+def resolve_requested_direction(flow_ckpt: dict[str, Any], requested: Direction) -> Direction:
+    ckpt_direction = checkpoint_direction(flow_ckpt)
+    if ckpt_direction is None:
+        raise ValueError("directional checkpoint does not declare a direction")
+    if requested != ckpt_direction:
+        raise ValueError(f"requested direction {requested!r} conflicts with checkpoint direction {ckpt_direction!r}")
+    return requested
+
+
+def main(*, default_checkpoint: Path, fixed_direction: Direction):
+    args = parse_args(default_checkpoint=default_checkpoint, fixed_direction=fixed_direction)
     if args.batch_size <= 0 or args.num_batches <= 0:
         raise ValueError("batch-size and num-batches must be positive")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args.checkpoint = resolve_project_path(args.checkpoint)
     flow_ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    if flow_ckpt.get("version") != "v1_symmetric_flow_matching":
-        raise ValueError(
-            f"Unsupported flow checkpoint version {flow_ckpt.get('version')!r}"
-        )
+    version = flow_ckpt.get("version")
+    if version not in SUPPORTED_FLOW_CHECKPOINT_VERSIONS:
+        raise ValueError(f"Unsupported flow checkpoint version {version!r}")
+    require_flow_checkpoint_keys(flow_ckpt, args.checkpoint)
+    args.direction = resolve_requested_direction(flow_ckpt, args.direction)
 
     seed = args.seed if args.seed is not None else int(flow_ckpt.get("seed", 42))
     torch.manual_seed(seed)
@@ -145,11 +151,11 @@ def main():
     image_scale = float(normalization.get("image_scale", 1.0))
     raw_energy_scale = float(normalization.get("raw_energy_scale", 1.0))
     projected_energy_scale = float(normalization.get("projected_energy_scale", 1.0))
-    surrogate_checkpoint = args.surrogate_checkpoint or Path(
-        flow_ckpt["surrogate_checkpoint"]
+    surrogate_checkpoint = resolve_project_path(
+        args.surrogate_checkpoint or Path(flow_ckpt["surrogate_checkpoint"])
     )
-    soft_scatter_checkpoint = args.soft_scatter_checkpoint or Path(
-        flow_ckpt["soft_scatter_checkpoint"]
+    soft_scatter_checkpoint = resolve_project_path(
+        args.soft_scatter_checkpoint or Path(flow_ckpt["soft_scatter_checkpoint"])
     )
     surrogate_temperature = (
         args.surrogate_temperature
@@ -157,29 +163,21 @@ def main():
         else float(flow_ckpt.get("surrogate_temperature", 1.0))
     )
 
-    print(f"Using device: {device}")
-    print(
-        f"Flow checkpoint: {args.checkpoint} (step {flow_ckpt.get('step', 'unknown')})"
-    )
-    print(f"Euler steps: {','.join(str(step) for step in args.steps)}")
+    print_checkpoint_header(args, flow_ckpt, device)
     print(
         f"Scales | image {image_scale:.4g} | raw_energy {raw_energy_scale:.4g} | "
         f"projected_energy {projected_energy_scale:.4g}"
     )
 
-    image_to_energy_flow = build_flow_model(
+    flow_model = build_flow_model(
         flow_ckpt["flow_model_config"],
-        flow_ckpt["image_to_energy_state_dict"],
+        state_dict_for_direction(flow_ckpt, args.direction),
         device,
     )
-    energy_to_image_flow = build_flow_model(
-        flow_ckpt["flow_model_config"],
-        flow_ckpt["energy_to_image_state_dict"],
-        device,
-    )
-    surrogate, surrogate_config = load_surrogate(Path(surrogate_checkpoint), device)
-    decoder, scatter_head, scatter_config, _scatter_ckpt = (
-        load_soft_scatter_autoencoder(Path(soft_scatter_checkpoint), device)
+    flow_model.eval()
+    surrogate, surrogate_config = load_surrogate(surrogate_checkpoint, device)
+    decoder, scatter_head, scatter_config, _scatter_ckpt = load_soft_scatter_autoencoder(
+        soft_scatter_checkpoint, device
     )
     if surrogate_config.n != scatter_config.n or surrogate_config.C != scatter_config.C:
         raise ValueError("surrogate and soft-scatter checkpoints must use matching n/C")
@@ -207,8 +205,7 @@ def main():
         "raw_energy": [],
         "projected_energy": [],
     }
-    generated_i2e: dict[int, list[torch.Tensor]] = {step: [] for step in args.steps}
-    generated_e2i: dict[int, list[torch.Tensor]] = {step: [] for step in args.steps}
+    generated: dict[int, list[torch.Tensor]] = {step: [] for step in args.steps}
 
     with torch.no_grad():
         for _batch_idx in range(args.num_batches):
@@ -225,15 +222,12 @@ def main():
             references["image"].append(image_seq)
             references["raw_energy"].append(raw_energy_seq)
             references["projected_energy"].append(projected_energy_seq)
+            if args.direction == "image-to-energy":
+                source_seq = image_seq
+            else:
+                source_seq = projected_energy_seq
             for steps in args.steps:
-                generated_i2e[steps].append(
-                    integrate_euler(image_to_energy_flow, image_seq, steps=steps)
-                )
-                generated_e2i[steps].append(
-                    integrate_euler(
-                        energy_to_image_flow, projected_energy_seq, steps=steps
-                    )
-                )
+                generated[steps].append(integrate_euler(flow_model, source_seq, steps=steps))
 
     reference_stats = {
         name: distribution_stats(concatenate_batches(batches))
@@ -244,22 +238,15 @@ def main():
     for name in ("image", "raw_energy", "projected_energy"):
         print(f"{name:>18} | {format_stats(reference_stats[name])}")
 
-    print(
-        "\nGenerated distributions: image_to_energy_flow(image) vs raw_energy reference"
-    )
-    for steps in args.steps:
-        stats = distribution_stats(concatenate_batches(generated_i2e[steps]))
-        delta = distribution_delta(stats, reference_stats["raw_energy"])
-        print(f"steps {steps:>3} | {format_stats(stats)} | {format_delta(delta)}")
-
-    print(
-        "\nGenerated distributions: energy_to_image_flow(projected_energy) vs image reference"
-    )
-    for steps in args.steps:
-        stats = distribution_stats(concatenate_batches(generated_e2i[steps]))
-        delta = distribution_delta(stats, reference_stats["image"])
-        print(f"steps {steps:>3} | {format_stats(stats)} | {format_delta(delta)}")
-
-
-if __name__ == "__main__":
-    main()
+    if args.direction == "image-to-energy":
+        print("\nGenerated distributions: image_to_energy_flow(image) vs raw_energy reference")
+        for steps in args.steps:
+            stats = distribution_stats(concatenate_batches(generated[steps]))
+            delta = distribution_delta(stats, reference_stats["raw_energy"])
+            print(f"steps {steps:>3} | {format_stats(stats)} | {format_delta(delta)}")
+    else:
+        print("\nGenerated distributions: energy_to_image_flow(projected_energy) vs image reference")
+        for steps in args.steps:
+            stats = distribution_stats(concatenate_batches(generated[steps]))
+            delta = distribution_delta(stats, reference_stats["image"])
+            print(f"steps {steps:>3} | {format_stats(stats)} | {format_delta(delta)}")

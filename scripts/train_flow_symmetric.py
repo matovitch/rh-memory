@@ -7,12 +7,13 @@ import itertools
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
+from path_utils import project_relative_path, resolve_project_path
 from torch.utils.data import DataLoader
 
 from rh_memory.decoder import RHDecoder
 from rh_memory.decoder_scatter import SoftScatterReconstructionHead
+from rh_memory.flow_matching import flow_matching_loss as flow_loss
 from rh_memory.flow_models import DilatedConvFlow1d
 from rh_memory.hilbert import hilbert_flatten_images, hilbert_metadata
 from rh_memory.image_shards import GrayscaleImageShardDataset, InMemoryGrayscaleImageShardDataset
@@ -48,6 +49,7 @@ def tensor_stats(x: torch.Tensor) -> dict[str, float]:
 
 
 def load_surrogate(checkpoint_path: Path, device: torch.device):
+    checkpoint_path = resolve_project_path(checkpoint_path)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if ckpt.get("version") != "v2_ce_no_decoder":
         raise ValueError(f"Unsupported surrogate checkpoint version {ckpt.get('version')!r}")
@@ -71,6 +73,7 @@ def load_surrogate(checkpoint_path: Path, device: torch.device):
 
 
 def load_soft_scatter_autoencoder(checkpoint_path: Path, device: torch.device):
+    checkpoint_path = resolve_project_path(checkpoint_path)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if ckpt.get("version") != "v1_decoder_soft_scatter_l1":
         raise ValueError(f"Unsupported soft-scatter checkpoint version {ckpt.get('version')!r}")
@@ -112,7 +115,16 @@ def parse_args():
     parser.add_argument("--image-manifest", type=Path, default=Path("data/grayscale_32x32_torch/manifest.json"))
     parser.add_argument("--surrogate-checkpoint", type=Path, default=Path("scripts/checkpoints/surrogate_ce_checkpoint.pt"))
     parser.add_argument("--soft-scatter-checkpoint", type=Path, default=Path("scripts/checkpoints/decoder_soft_scatter_l1_checkpoint.pt"))
-    parser.add_argument("--checkpoint", type=Path, default=Path("scripts/checkpoints/symmetric_flow_checkpoint.pt"))
+    parser.add_argument(
+        "--image-to-energy-checkpoint",
+        type=Path,
+        default=Path("scripts/checkpoints/symmetric_flow_image_to_energy_checkpoint.pt"),
+    )
+    parser.add_argument(
+        "--energy-to-image-checkpoint",
+        type=Path,
+        default=Path("scripts/checkpoints/symmetric_flow_energy_to_image_checkpoint.pt"),
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--total-steps", type=int, default=40_000)
@@ -132,6 +144,50 @@ def parse_args():
     parser.add_argument("--raw-energy-scale", type=float, default=1.0)
     parser.add_argument("--projected-energy-scale", type=float, default=1.0)
     return parser.parse_args()
+
+
+def make_directional_checkpoint(
+    *,
+    direction: str,
+    state_dict: dict[str, torch.Tensor],
+    step: int,
+    config: PipelineConfig,
+    flow_model_config: dict[str, int | bool | list[int]],
+    args,
+    scatter_ckpt: dict,
+    training_seed,
+    metrics: dict,
+) -> dict:
+    return {
+        "version": "v1_directional_flow_matching",
+        "checkpoint_role": "directional_flow_matching",
+        "source_script": "scripts/train_flow_symmetric.py",
+        "direction": direction,
+        "step": step,
+        "state_dict": state_dict,
+        "config": config.to_dict(),
+        "flow_model_config": flow_model_config,
+        "hilbert": hilbert_metadata(32),
+        "normalization": {
+            "image_scale": args.image_scale,
+            "raw_energy_scale": args.raw_energy_scale,
+            "projected_energy_scale": args.projected_energy_scale,
+        },
+        "surrogate_checkpoint": project_relative_path(args.surrogate_checkpoint),
+        "soft_scatter_checkpoint": project_relative_path(args.soft_scatter_checkpoint),
+        "soft_scatter_checkpoint_version": scatter_ckpt.get("version"),
+        "surrogate_temperature": args.surrogate_temperature,
+        "time_sampling": {
+            "distribution": "beta",
+            "alpha": args.time_beta_alpha,
+            "beta": args.time_beta_beta,
+        },
+        "eps": args.eps,
+        "lr": args.lr,
+        "seed": args.seed,
+        "seed_source": training_seed.source,
+        "metrics": metrics,
+    }
 
 
 def make_image_iterator(args, device: torch.device):
@@ -171,15 +227,6 @@ def make_energy_batch(sample, decoder, scatter_head, config: PipelineConfig, arg
     return raw_energy, projected_energy
 
 
-def flow_loss(model, start: torch.Tensor, end: torch.Tensor, t: torch.Tensor):
-    view_t = t.view(t.shape[0], 1, 1)
-    x_t = (1.0 - view_t) * start + view_t * end
-    target_velocity = end - start
-    pred_velocity = model(x_t, t)
-    loss = F.mse_loss(pred_velocity, target_velocity)
-    return loss, pred_velocity, target_velocity
-
-
 def main():
     args = parse_args()
     if not (0.0 <= args.eps < 0.5):
@@ -193,13 +240,12 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    flow_ckpt = None
-    if args.checkpoint.exists():
-        flow_ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        if flow_ckpt.get("version") != "v1_symmetric_flow_matching":
-            raise ValueError(f"Unsupported flow checkpoint version {flow_ckpt.get('version')!r}")
+    args.image_to_energy_checkpoint = resolve_project_path(args.image_to_energy_checkpoint)
+    args.energy_to_image_checkpoint = resolve_project_path(args.energy_to_image_checkpoint)
+    args.surrogate_checkpoint = resolve_project_path(args.surrogate_checkpoint)
+    args.soft_scatter_checkpoint = resolve_project_path(args.soft_scatter_checkpoint)
 
-    training_seed = apply_training_seed(args.seed, flow_ckpt)
+    training_seed = apply_training_seed(args.seed, None)
     args.seed = training_seed.seed
     print(f"Using seed: {training_seed.seed} ({training_seed.source})")
 
@@ -240,14 +286,6 @@ def main():
         lr=args.lr,
     )
 
-    start_step = 0
-    if flow_ckpt is not None:
-        image_to_energy_flow.load_state_dict(flow_ckpt["image_to_energy_state_dict"])
-        energy_to_image_flow.load_state_dict(flow_ckpt["energy_to_image_state_dict"])
-        optimizer.load_state_dict(flow_ckpt["optimizer_state_dict"])
-        start_step = int(flow_ckpt.get("step", 0))
-        print(f"Resumed flow checkpoint from step {start_step}")
-
     image_iter = make_image_iterator(args, device)
     harmonic_stream = harmonic_stage(config=config, device=device)
     surrogate_stream = surrogate_stage(harmonic_stream, config=config, surrogate=surrogate, temperature=args.surrogate_temperature)
@@ -257,8 +295,7 @@ def main():
     running_batches = 0
     time_dist = torch.distributions.Beta(args.time_beta_alpha, args.time_beta_beta)
 
-    for step_idx in range(1, args.total_steps - start_step + 1):
-        step = start_step + step_idx
+    for step in range(1, args.total_steps + 1):
         image_seq = next(image_iter)
         sample = next(surrogate_stream)
         raw_energy_seq, projected_energy_seq = make_energy_batch(sample, decoder, scatter_head, config, args, device)
@@ -317,50 +354,50 @@ def main():
                 f"projected_energy: {endpoint_stats['projected_energy']['rms']:.4f}"
             )
 
-            args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            args.image_to_energy_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            args.energy_to_image_checkpoint.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
-                {
-                    "version": "v1_symmetric_flow_matching",
-                    "checkpoint_role": "symmetric_flow_matching",
-                    "source_script": "scripts/train_flow_symmetric.py",
-                    "step": step,
-                    "image_to_energy_state_dict": image_to_energy_flow.state_dict(),
-                    "energy_to_image_state_dict": energy_to_image_flow.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "config": config.to_dict(),
-                    "flow_model_config": image_to_energy_flow.config_dict(),
-                    "hilbert": hilbert_metadata(32),
-                    "normalization": {
-                        "image_scale": args.image_scale,
-                        "raw_energy_scale": args.raw_energy_scale,
-                        "projected_energy_scale": args.projected_energy_scale,
-                    },
-                    "surrogate_checkpoint": str(args.surrogate_checkpoint),
-                    "soft_scatter_checkpoint": str(args.soft_scatter_checkpoint),
-                    "soft_scatter_checkpoint_version": scatter_ckpt.get("version"),
-                    "surrogate_temperature": args.surrogate_temperature,
-                    "time_sampling": {
-                        "distribution": "beta",
-                        "alpha": args.time_beta_alpha,
-                        "beta": args.time_beta_beta,
-                    },
-                    "eps": args.eps,
-                    "lr": args.lr,
-                    "seed": args.seed,
-                    "seed_source": training_seed.source,
-                    "metrics": {
-                        "image_to_energy_mse": avg_i2e,
-                        "energy_to_image_mse": avg_e2i,
-                        "image_to_energy_velocity_cosine": i2e_cos,
-                        "energy_to_image_velocity_cosine": e2i_cos,
-                        "image_to_energy_velocity_rel_l2_percent": i2e_rel,
-                        "energy_to_image_velocity_rel_l2_percent": e2i_rel,
+                make_directional_checkpoint(
+                    direction="image-to-energy",
+                    state_dict=image_to_energy_flow.state_dict(),
+                    step=step,
+                    config=config,
+                    flow_model_config=image_to_energy_flow.config_dict(),
+                    args=args,
+                    scatter_ckpt=scatter_ckpt,
+                    training_seed=training_seed,
+                    metrics={
+                        "mse": avg_i2e,
+                        "velocity_cosine": i2e_cos,
+                        "velocity_rel_l2_percent": i2e_rel,
                         "endpoint_stats": endpoint_stats,
                     },
-                },
-                args.checkpoint,
+                ),
+                args.image_to_energy_checkpoint,
             )
-            print(f"Saved checkpoint to {args.checkpoint}")
+            torch.save(
+                make_directional_checkpoint(
+                    direction="energy-to-image",
+                    state_dict=energy_to_image_flow.state_dict(),
+                    step=step,
+                    config=config,
+                    flow_model_config=energy_to_image_flow.config_dict(),
+                    args=args,
+                    scatter_ckpt=scatter_ckpt,
+                    training_seed=training_seed,
+                    metrics={
+                        "mse": avg_e2i,
+                        "velocity_cosine": e2i_cos,
+                        "velocity_rel_l2_percent": e2i_rel,
+                        "endpoint_stats": endpoint_stats,
+                    },
+                ),
+                args.energy_to_image_checkpoint,
+            )
+            print(
+                "Saved directional checkpoints to "
+                f"{args.image_to_energy_checkpoint} and {args.energy_to_image_checkpoint}"
+                )
             running_i2e = 0.0
             running_e2i = 0.0
             running_batches = 0

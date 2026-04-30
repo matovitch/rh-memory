@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 import torch.optim as optim
+from path_utils import resolve_project_path
 
 from rh_memory.surrogate import RHSurrogate, RHSurrogateLoss
 
@@ -58,6 +59,8 @@ def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    args.checkpoint = resolve_project_path(args.checkpoint)
 
     ckpt = None
     if args.checkpoint.exists():

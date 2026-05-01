@@ -18,7 +18,9 @@ class RotaryEmbedding(nn.Module):
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
 
-    def forward(self, seq_len: int, device: torch.device) -> tuple[Float[Tensor, "seq_len head_dim"], Float[Tensor, "seq_len head_dim"]]:
+    def forward(
+        self, seq_len: int, device: torch.device
+    ) -> tuple[Float[Tensor, "seq_len head_dim"], Float[Tensor, "seq_len head_dim"]]:
         inv_freq = cast(Tensor, self.inv_freq)
         t = torch.arange(seq_len, device=device).to(dtype=inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, inv_freq)

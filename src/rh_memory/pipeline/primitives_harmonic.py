@@ -16,9 +16,7 @@ def harmonic_raw_batch(
     max_harmonics: int,
 ) -> Float[Tensor, "B N"]:
     """Pseudo-harmonic peaks used by surrogate and decoder training/evaluation."""
-    t = torch.linspace(0.0, 1.0, n, device=device, dtype=torch.float32).unsqueeze(0).expand(
-        chunk_size, n
-    )
+    t = torch.linspace(0.0, 1.0, n, device=device, dtype=torch.float32).unsqueeze(0).expand(chunk_size, n)
     gamma = harmonic_decay
     tau = harmonic_amp_threshold
     max_h = max_harmonics
@@ -42,7 +40,5 @@ def harmonic_raw_batch(
         sum_peaks += alpha_k * envelope
         k_h += 1
 
-    signs = (
-        torch.empty(chunk_size, n, device=device, dtype=torch.float32).uniform_(0.0, 1.0).round() * 2 - 1
-    )
+    signs = torch.empty(chunk_size, n, device=device, dtype=torch.float32).uniform_(0.0, 1.0).round() * 2 - 1
     return sum_peaks * signs

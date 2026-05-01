@@ -37,3 +37,11 @@ Assumptions:
 
 - Python and Triton paths are intended to match semantics.
 - Triton may stage contiguous buffers internally before writing results back.
+
+## Planned End-to-End Role
+
+In the planned LPAP autoencoder, LPAP remains the discrete bottleneck operator that defines bucket winners by amplitude. The end-to-end model does not backprop through hard LPAP routing directly. Instead, LPAP is used to compute teacher slot targets from the current learned energy sequence, and the active surrogate is regularized to predict those targets.
+
+This keeps the surrogate tied to the intended LPAP semantics while allowing the image-to-energy flow to discover a learned energy geometry that may differ from the harmonic pretraining distribution.
+
+The long-term level-of-detail axis is `C`: using multiple surrogate + decoder/scatter branches with different bucket counts changes how many approximate top-amplitude winners survive the bottleneck. Sampling or swapping among branches such as `C=64`, `C=128`, and `C=256` should pressure the learned energy space to be amplitude ordered across levels of detail.

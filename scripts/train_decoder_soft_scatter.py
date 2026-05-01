@@ -73,8 +73,7 @@ def load_pretrained_decoder(checkpoint_path: Path, device: torch.device):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if ckpt.get("version") != "v1_soft_decoder_distill":
         raise ValueError(
-            f"Unsupported decoder checkpoint version {ckpt.get('version')!r}; "
-            "expected v1_soft_decoder_distill."
+            f"Unsupported decoder checkpoint version {ckpt.get('version')!r}; expected v1_soft_decoder_distill."
         )
     config = PipelineConfig.from_dict(ckpt["config"])
     model_config = ckpt["model_config"]
@@ -93,7 +92,9 @@ def load_pretrained_decoder(checkpoint_path: Path, device: torch.device):
 def parse_args():
     p = argparse.ArgumentParser(description="Fine-tune RHDecoder by soft-scatter L1 reconstruction.")
     p.add_argument("--surrogate-checkpoint", type=Path, default=Path("scripts/checkpoints/surrogate_ce_checkpoint.pt"))
-    p.add_argument("--decoder-checkpoint", type=Path, default=Path("scripts/checkpoints/decoder_soft_distill_checkpoint.pt"))
+    p.add_argument(
+        "--decoder-checkpoint", type=Path, default=Path("scripts/checkpoints/decoder_soft_distill_checkpoint.pt")
+    )
     p.add_argument("--n", type=int, default=None, help="Override sequence length (default: from surrogate meta)")
     p.add_argument("--C", type=int, default=None, help="Override bucket count (default: from surrogate meta)")
     p.add_argument("--batch-size", type=int, default=32)

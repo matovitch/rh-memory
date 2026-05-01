@@ -10,6 +10,11 @@ cuda = "12.0"
 
 [tasks]
 # Usage: extra CLI args go after `--`, e.g. `pixi run test -- tests/test_surrogate.py -q`
+lint = "ruff check ."
+format = "ruff format ."
+format-check = "ruff format . --check"
+pre-commit = "pre-commit run --all-files"
+pre-commit-install = "pre-commit install --install-hooks"
 test = "python -m pytest"
 typecheck = "basedpyright"
 train-surrogate = "python scripts/train_surrogate.py"
@@ -17,9 +22,10 @@ train-decoder = "python scripts/train_decoder.py"
 train-decoder-scatter = "python scripts/train_decoder_soft_scatter.py"
 prepare-grayscale-data = "python scripts/prepare_grayscale_dataset.py"
 train-flow-symmetric = "python scripts/train_flow_symmetric.py"
+train-lpap-autoencoder = "python scripts/train_lpap_autoencoder.py"
 eval-flow-i2e = "python scripts/eval_image_to_energy_distributions.py"
 eval-flow-e2i = "python scripts/eval_energy_to_image_distributions.py"
-train-reflow-i2e = "python scripts/train_flow_reflow.py --direction image-to-energy --teacher-checkpoint scripts/checkpoints/symmetric_flow_image_to_energy_checkpoint.pt --teacher-steps 64 --checkpoint scripts/checkpoints/reflow_image_to_energy_checkpoint.pt"
+train-reflow-i2e = "python scripts/train_flow_reflow.py --direction image-to-energy --teacher-checkpoint scripts/checkpoints/symmetric_flow_image_to_energy_checkpoint.pt --teacher-steps 128 --checkpoint scripts/checkpoints/reflow_image_to_energy_checkpoint.pt"
 train-reflow-e2i = "python scripts/train_flow_reflow.py --direction energy-to-image --teacher-checkpoint scripts/checkpoints/symmetric_flow_energy_to_image_checkpoint.pt --teacher-steps 128 --checkpoint scripts/checkpoints/reflow_energy_to_image_checkpoint.pt"
 
 [target.unix.activation.env]
@@ -36,3 +42,4 @@ cuda-cudart-dev = ">=12.9.79,<13"
 jaxtyping = ">=0.3.7,<0.4"
 ruff = ">=0.15.11,<0.16"
 basedpyright = ">=1.39.3,<2"
+pre-commit = ">=4.6.0,<5"

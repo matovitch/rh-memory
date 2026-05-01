@@ -29,6 +29,7 @@ def _surrogate(n: int, C: int):
     surrogate.eval()
     return surrogate
 
+
 def test_pipeline_stage_shapes():
     n, C, B = 32, 8, 2
     config = PipelineConfig(n=n, C=C, batch_size=B, seed=7, fast_k=1.0, max_harmonics=8)
@@ -65,15 +66,14 @@ def test_pipeline_adapters_shapes():
     assert s_batch[2].shape == (B, C)
     assert s_batch[3].shape == (B, C)
 
+
 def test_surrogate_training_adapter_keeps_sample_x_perm_read_only():
     n, C, B = 32, 8, 2
     config = PipelineConfig(n=n, C=C, batch_size=B, seed=13, fast_k=1.0, max_harmonics=8)
     sample = next(harmonic_stage(config=config, device="cpu"))
     x_before = sample.x_perm.clone()
 
-    bucket_input, _target_idx, _valid_bucket, _weights = next(
-        surrogate_training_adapter(iter([sample]), config=config)
-    )
+    bucket_input, _target_idx, _valid_bucket, _weights = next(surrogate_training_adapter(iter([sample]), config=config))
 
     assert torch.equal(sample.x_perm, x_before)
     assert torch.equal(bucket_input, reshape_permuted_to_bucket_tokens(x_before, C))

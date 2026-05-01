@@ -49,9 +49,7 @@ class RHDecoder(nn.Module):
 
     def forward(self, decoder_tokens: Float[Tensor, "B C 3"]) -> Float[Tensor, "B C N"]:
         if decoder_tokens.size(1) != self.bucket_count:
-            raise ValueError(
-                f"Expected bucket_count={self.bucket_count}, got tokens with C={decoder_tokens.size(1)}"
-            )
+            raise ValueError(f"Expected bucket_count={self.bucket_count}, got tokens with C={decoder_tokens.size(1)}")
         x = self.input_proj(decoder_tokens)
         for layer in self.layers:
             x = layer(x)

@@ -48,10 +48,7 @@ def main() -> None:
         skip_errors=args.skip_errors,
         progress_every=args.progress_every,
     )
-    print(
-        f"wrote {stats.image_count} images across {stats.shard_count} shards "
-        f"to {stats.manifest_path.parent}"
-    )
+    print(f"wrote {stats.image_count} images across {stats.shard_count} shards to {stats.manifest_path.parent}")
     if stats.skipped_count:
         print(f"skipped {stats.skipped_count} images")
     print(f"manifest: {stats.manifest_path}")

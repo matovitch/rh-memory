@@ -111,9 +111,7 @@ def triton_linear_probing_amplitude_pooling(
 
     _validate_lpap_dtypes(table_values, table_dib, table_carry_id, incoming_values, incoming_carry_id)
 
-    inc_vals, inc_carry = _reshape_incoming_to_pipeline(
-        incoming_values, incoming_carry_id, batch_size, stride
-    )
+    inc_vals, inc_carry = _reshape_incoming_to_pipeline(incoming_values, incoming_carry_id, batch_size, stride)
 
     inc_dib = torch.zeros((batch_size, stride, C), dtype=torch.int32, device=inc_vals.device)
 

@@ -26,23 +26,17 @@ from rh_memory.surrogate import RHSurrogate
 from rh_memory.training_seed import apply_training_seed
 
 
-def relative_l2_percent(
-    pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8
-) -> float:
+def relative_l2_percent(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
     err = torch.linalg.vector_norm((pred - target).flatten(1), ord=2, dim=1)
     den = torch.linalg.vector_norm(target.flatten(1), ord=2, dim=1).clamp_min(eps)
     return ((err / den).mean().item()) * 100.0
 
 
-def cosine_similarity(
-    pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8
-) -> float:
+def cosine_similarity(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
     pred_flat = pred.flatten(1)
     target_flat = target.flatten(1)
     num = (pred_flat * target_flat).sum(dim=1)
-    den = torch.linalg.vector_norm(pred_flat, ord=2, dim=1) * torch.linalg.vector_norm(
-        target_flat, ord=2, dim=1
-    )
+    den = torch.linalg.vector_norm(pred_flat, ord=2, dim=1) * torch.linalg.vector_norm(target_flat, ord=2, dim=1)
     return (num / den.clamp_min(eps)).mean().item()
 
 
@@ -62,9 +56,7 @@ def load_surrogate(checkpoint_path: Path, device: torch.device):
     checkpoint_path = resolve_project_path(checkpoint_path)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if ckpt.get("version") != "v2_ce_no_decoder":
-        raise ValueError(
-            f"Unsupported surrogate checkpoint version {ckpt.get('version')!r}"
-        )
+        raise ValueError(f"Unsupported surrogate checkpoint version {ckpt.get('version')!r}")
     config = PipelineConfig.from_dict(ckpt["config"])
     model_config = ckpt["model_config"]
     model = RHSurrogate(
@@ -88,9 +80,7 @@ def load_soft_scatter_autoencoder(checkpoint_path: Path, device: torch.device):
     checkpoint_path = resolve_project_path(checkpoint_path)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if ckpt.get("version") != "v1_decoder_soft_scatter_l1":
-        raise ValueError(
-            f"Unsupported soft-scatter checkpoint version {ckpt.get('version')!r}"
-        )
+        raise ValueError(f"Unsupported soft-scatter checkpoint version {ckpt.get('version')!r}")
     config = PipelineConfig.from_dict(ckpt["config"])
     model_config = ckpt["model_config"]
     decoder = RHDecoder(
@@ -118,9 +108,7 @@ def parse_dilations(value: str) -> tuple[int, ...]:
     try:
         dilations = tuple(int(part) for part in value.split(",") if part)
     except ValueError as error:
-        raise argparse.ArgumentTypeError(
-            "dilations must be comma-separated integers"
-        ) from error
+        raise argparse.ArgumentTypeError("dilations must be comma-separated integers") from error
     if not dilations or any(dilation <= 0 for dilation in dilations):
         raise argparse.ArgumentTypeError("dilations must contain positive integers")
     return dilations
@@ -146,16 +134,12 @@ def parse_args():
     parser.add_argument(
         "--image-to-energy-checkpoint",
         type=Path,
-        default=Path(
-            "scripts/checkpoints/symmetric_flow_image_to_energy_checkpoint.pt"
-        ),
+        default=Path("scripts/checkpoints/symmetric_flow_image_to_energy_checkpoint.pt"),
     )
     parser.add_argument(
         "--energy-to-image-checkpoint",
         type=Path,
-        default=Path(
-            "scripts/checkpoints/symmetric_flow_energy_to_image_checkpoint.pt"
-        ),
+        default=Path("scripts/checkpoints/symmetric_flow_energy_to_image_checkpoint.pt"),
     )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -169,13 +153,9 @@ def parse_args():
     parser.add_argument("--flow-width", type=int, default=128)
     parser.add_argument("--time-dim", type=int, default=128)
     parser.add_argument("--dilation-cycles", type=int, default=2)
-    parser.add_argument(
-        "--dilations", type=parse_dilations, default=(1, 2, 4, 8, 16, 32, 64, 128)
-    )
+    parser.add_argument("--dilations", type=parse_dilations, default=(1, 2, 4, 8, 16, 32, 64, 128))
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument(
-        "--preload-images", action=argparse.BooleanOptionalAction, default=True
-    )
+    parser.add_argument("--preload-images", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--image-scale", type=float, default=1.0)
     parser.add_argument("--raw-energy-scale", type=float, default=1.0)
     parser.add_argument("--projected-energy-scale", type=float, default=1.0)
@@ -259,13 +239,9 @@ def validate_resume_checkpoint_pair(image_to_energy_ckpt: dict, energy_to_image_
             f"Cannot resume energy-to-image base flow from checkpoint version {energy_to_image_ckpt.get('version')!r}"
         )
     if checkpoint_direction(image_to_energy_ckpt) != "image-to-energy":
-        raise ValueError(
-            f"image-to-energy checkpoint has direction {checkpoint_direction(image_to_energy_ckpt)!r}"
-        )
+        raise ValueError(f"image-to-energy checkpoint has direction {checkpoint_direction(image_to_energy_ckpt)!r}")
     if checkpoint_direction(energy_to_image_ckpt) != "energy-to-image":
-        raise ValueError(
-            f"energy-to-image checkpoint has direction {checkpoint_direction(energy_to_image_ckpt)!r}"
-        )
+        raise ValueError(f"energy-to-image checkpoint has direction {checkpoint_direction(energy_to_image_ckpt)!r}")
     if dict(image_to_energy_ckpt["flow_model_config"]) != dict(energy_to_image_ckpt["flow_model_config"]):
         raise ValueError("resume checkpoints must use matching flow_model_config")
     i2e_step = int(image_to_energy_ckpt.get("step", 0))
@@ -279,14 +255,10 @@ def make_image_iterator(args, device: torch.device):
     generator = torch.Generator().manual_seed(args.seed)
     if args.preload_images:
         if args.num_workers != 0:
-            raise ValueError(
-                "--preload-images should use --num-workers 0 to avoid duplicating the in-memory dataset"
-            )
+            raise ValueError("--preload-images should use --num-workers 0 to avoid duplicating the in-memory dataset")
         print(f"Preloading image shards into RAM from {args.image_manifest}...")
         dataset = InMemoryGrayscaleImageShardDataset(args.image_manifest, as_float=True)
-        print(
-            f"Preloaded {len(dataset)} images as uint8 ({dataset.images.numel() / 1024**3:.2f} GiB)"
-        )
+        print(f"Preloaded {len(dataset)} images as uint8 ({dataset.images.numel() / 1024**3:.2f} GiB)")
     else:
         dataset = GrayscaleImageShardDataset(args.image_manifest, as_float=True)
     loader = DataLoader(
@@ -303,9 +275,7 @@ def make_image_iterator(args, device: torch.device):
 
 
 @torch.no_grad()
-def make_energy_batch(
-    sample, decoder, scatter_head, config: PipelineConfig, args, device: torch.device
-):
+def make_energy_batch(sample, decoder, scatter_head, config: PipelineConfig, args, device: torch.device):
     raw_energy = sample.raw_inputs.to(device).unsqueeze(1).mul(args.raw_energy_scale)
     decoder_tokens = sample.decoder_tokens.to(device)
     decoder_logits = decoder(decoder_tokens)[:, : config.C, : config.n]
@@ -324,19 +294,15 @@ def main():
         raise ValueError(f"eps must be in [0, 0.5), got {args.eps}")
     if args.time_beta_alpha <= 0.0 or args.time_beta_beta <= 0.0:
         raise ValueError(
-            "time-beta-alpha and time-beta-beta must be positive, got "
-            f"{args.time_beta_alpha} and {args.time_beta_beta}"
+            "time-beta-alpha and time-beta-beta must be positive, "
+            + f"got {args.time_beta_alpha} and {args.time_beta_beta}"
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    args.image_to_energy_checkpoint = resolve_project_path(
-        args.image_to_energy_checkpoint
-    )
-    args.energy_to_image_checkpoint = resolve_project_path(
-        args.energy_to_image_checkpoint
-    )
+    args.image_to_energy_checkpoint = resolve_project_path(args.image_to_energy_checkpoint)
+    args.energy_to_image_checkpoint = resolve_project_path(args.energy_to_image_checkpoint)
     args.surrogate_checkpoint = resolve_project_path(args.surrogate_checkpoint)
     args.soft_scatter_checkpoint = resolve_project_path(args.soft_scatter_checkpoint)
 
@@ -368,9 +334,7 @@ def main():
         max_harmonics=surrogate_config.max_harmonics,
     )
     if config.n != 1024:
-        raise ValueError(
-            f"this first flow script expects n=1024 for 32x32 Hilbert images, got {config.n}"
-        )
+        raise ValueError(f"this first flow script expects n=1024 for 32x32 Hilbert images, got {config.n}")
 
     flow_model_config = {
         "sequence_length": config.n,
@@ -398,9 +362,7 @@ def main():
         dilations=args.dilations,
     ).to(device)
     optimizer = optim.AdamW(
-        itertools.chain(
-            image_to_energy_flow.parameters(), energy_to_image_flow.parameters()
-        ),
+        itertools.chain(image_to_energy_flow.parameters(), energy_to_image_flow.parameters()),
         lr=args.lr,
     )
 
@@ -437,9 +399,7 @@ def main():
         step = start_step + step_idx
         image_seq = next(image_iter)
         sample = next(surrogate_stream)
-        raw_energy_seq, projected_energy_seq = make_energy_batch(
-            sample, decoder, scatter_head, config, args, device
-        )
+        raw_energy_seq, projected_energy_seq = make_energy_batch(sample, decoder, scatter_head, config, args, device)
         t_unit = time_dist.sample((config.batch_size,)).to(device=device)
         t = args.eps + (1.0 - 2.0 * args.eps) * t_unit
         s = 1.0 - t

@@ -51,7 +51,9 @@ def decoder_soft_scatter(
         temperature_value = decoder_logits.new_tensor(float(temperature))
 
     probs = F.softmax(decoder_logits / temperature_value, dim=-1)
-    weighted_values = probs * bucket_amplitude.to(device=decoder_logits.device, dtype=decoder_logits.dtype).unsqueeze(-1)
+    weighted_values = probs * bucket_amplitude.to(device=decoder_logits.device, dtype=decoder_logits.dtype).unsqueeze(
+        -1
+    )
 
     source_index_by_slot = perm_1d.to(device=decoder_logits.device, dtype=torch.long)
     source_index = source_index_by_slot.view(1, 1, n).expand(B, C, n)

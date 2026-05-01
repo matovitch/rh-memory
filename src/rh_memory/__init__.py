@@ -8,7 +8,21 @@ from .decoder_scatter import SoftScatterReconstructionHead, decoder_soft_scatter
 from .flow_integration import EulerFlowIntegrator, integrate_euler_midpoint_time
 from .flow_models import DilatedConvFlow1d, flow_matching_loss, interpolate_linear
 from .hilbert import hilbert_flatten_images, hilbert_permutation, hilbert_unflatten_images
-from .image_shards import GrayscaleImageShardDataset, InMemoryGrayscaleImageShardDataset, iter_image_shards, load_image_shard
+from .image_shards import (
+    GrayscaleImageShardDataset,
+    InMemoryGrayscaleImageShardDataset,
+    iter_image_shards,
+    load_image_shard,
+)
+from .lpap_autoencoder import (
+    LPAPAutoencoder,
+    LPAPAutoencoderLoss,
+    LPAPAutoencoderLossOutput,
+    LPAPAutoencoderOutput,
+    LPAPBottleneckBranch,
+    LPAPSurrogateTargets,
+    lpap_surrogate_targets,
+)
 
 __all__ = [
     "python_linear_probing_amplitude_pooling",
@@ -30,4 +44,11 @@ __all__ = [
     "InMemoryGrayscaleImageShardDataset",
     "iter_image_shards",
     "load_image_shard",
+    "LPAPAutoencoder",
+    "LPAPAutoencoderLoss",
+    "LPAPAutoencoderLossOutput",
+    "LPAPAutoencoderOutput",
+    "LPAPBottleneckBranch",
+    "LPAPSurrogateTargets",
+    "lpap_surrogate_targets",
 ]

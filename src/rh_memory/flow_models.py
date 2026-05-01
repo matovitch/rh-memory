@@ -24,9 +24,7 @@ class SinusoidalTimeEmbedding(nn.Module):
             raise ValueError(f"t must have shape [B], got {tuple(t.shape)}")
         half = self.dim // 2
         freqs = torch.exp(
-            -math.log(self.max_period)
-            * torch.arange(half, device=t.device, dtype=t.dtype)
-            / max(half, 1)
+            -math.log(self.max_period) * torch.arange(half, device=t.device, dtype=t.dtype) / max(half, 1)
         )
         args = t.unsqueeze(1) * freqs.unsqueeze(0)
         emb = torch.cat([torch.cos(args), torch.sin(args)], dim=1)
@@ -49,7 +47,9 @@ class DilatedResidualBlock1d(nn.Module):
         self.norm2 = nn.GroupNorm(1, width)
         self.conv2 = nn.Conv1d(width, width, kernel_size, padding=padding, dilation=dilation)
 
-    def forward(self, x: Float[Tensor, "B width N"], time_emb: Float[Tensor, "B time_dim"]) -> Float[Tensor, "B width N"]:
+    def forward(
+        self, x: Float[Tensor, "B width N"], time_emb: Float[Tensor, "B time_dim"]
+    ) -> Float[Tensor, "B width N"]:
         h = self.conv1(F.silu(self.norm1(x)))
         scale, shift = self.time_proj(time_emb).chunk(2, dim=1)
         h = h * (1.0 + scale.unsqueeze(-1)) + shift.unsqueeze(-1)

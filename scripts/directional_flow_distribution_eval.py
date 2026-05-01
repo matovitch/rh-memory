@@ -40,6 +40,7 @@ from rh_memory.pipeline import PipelineConfig, harmonic_stage, surrogate_stage
 
 Direction = Literal["image-to-energy", "energy-to-image"]
 
+
 def parse_args(*, default_checkpoint: Path, fixed_direction: Direction):
     parser = argparse.ArgumentParser(description="Evaluate directional flow endpoint distributions.")
     parser.add_argument(
@@ -151,9 +152,7 @@ def main(*, default_checkpoint: Path, fixed_direction: Direction):
     image_scale = float(normalization.get("image_scale", 1.0))
     raw_energy_scale = float(normalization.get("raw_energy_scale", 1.0))
     projected_energy_scale = float(normalization.get("projected_energy_scale", 1.0))
-    surrogate_checkpoint = resolve_project_path(
-        args.surrogate_checkpoint or Path(flow_ckpt["surrogate_checkpoint"])
-    )
+    surrogate_checkpoint = resolve_project_path(args.surrogate_checkpoint or Path(flow_ckpt["surrogate_checkpoint"]))
     soft_scatter_checkpoint = resolve_project_path(
         args.soft_scatter_checkpoint or Path(flow_ckpt["soft_scatter_checkpoint"])
     )
@@ -229,10 +228,7 @@ def main(*, default_checkpoint: Path, fixed_direction: Direction):
             for steps in args.steps:
                 generated[steps].append(integrate_euler(flow_model, source_seq, steps=steps))
 
-    reference_stats = {
-        name: distribution_stats(concatenate_batches(batches))
-        for name, batches in references.items()
-    }
+    reference_stats = {name: distribution_stats(concatenate_batches(batches)) for name, batches in references.items()}
 
     print("\nReference distributions")
     for name in ("image", "raw_energy", "projected_energy"):

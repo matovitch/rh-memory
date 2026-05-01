@@ -64,15 +64,30 @@ After initial flow matching, apply reflow independently to both directional mode
 
 The goal is to make trajectories straight enough that inference eventually needs very few integration steps. Step-count diagnostics belong in a later dedicated evaluator rather than in the first symmetric training loop.
 
-## Later End-to-End Stage
+## End-to-End LPAP Autoencoder Stage
 
-Only after the directional flows are useful, train the larger stack end-to-end. At that point the LPAP autoencoder stack may co-adapt, but it should remain constrained by regularizers:
+After the directional flows are useful as initializers, train the larger LPAP autoencoder stack end-to-end on real grayscale images:
 
-- Surrogate LPAP regularizer: keeps surrogate logits aligned with the LPAP teacher / magnitude-ranked memory semantics.
-- Latent-energy L1 reconstruction regularizer: keeps the surrogate + decoder + soft-scatter autoencoder reconstructing its latent-energy input in the L1/magnitude sense.
-- Optional cycle consistency: encourages a sample transported through both directional flows to return near its starting point.
+1. Flatten image tensors through the canonical Hilbert order to `[B, 1, 1024]`.
+2. Integrate the image-to-energy flow to produce unpooled learned energy `[B, 1, 1024]`.
+3. Feed the learned energy through the active LPAP bottleneck branch: surrogate, decoder, and soft scatter.
+4. Treat the soft-scatter output as pooled/projected energy `[B, 1, 1024]`.
+5. Integrate the energy-to-image flow to reconstruct the image sequence.
 
-The LPAP regularizer should likely be relatively strong at first; otherwise the surrogate may learn a private code that helps the flow objective but stops behaving like the intended LPAP bottleneck.
+In this stage, harmonic/raw-energy flow matching is only an initialization story. The learned energy geometry should be allowed to drift away from the naive harmonic space if doing so improves reconstruction through the LPAP-like bottleneck. The objective is not to keep the image-to-energy flow close to raw harmonic samples, and it is not to keep the energy-to-image flow close to the projected-energy distribution from the frozen pretraining stack.
+
+The first end-to-end objective should contain:
+
+- Image reconstruction MSE on the final energy-to-image output.
+- A surrogate LPAP regularizer computed from the current image-to-energy output, keeping surrogate logits aligned with the discrete LPAP operator.
+
+The first end-to-end objective should exclude:
+
+- Cycle consistency loss.
+- Flow-matching side losses for either direction.
+- A latent-energy L1 reconstruction regularizer on the bottleneck itself.
+
+The LPAP regularizer is a constraint on the surrogate branch, not a target that pins the learned energy geometry to the harmonic initializer.
 
 ## Pairing Caveat
 
@@ -98,11 +113,11 @@ To nudge the experiment toward level-of-detail-oriented compression, train sever
 - `C=128` for intermediate compression.
 - `C=256` for higher-detail compression.
 
-During later end-to-end flow training, swap between these frozen or slowly updated surrogate variants so the generator sees multiple LPAP bottleneck capacities rather than only one approximate top-`C` prior.
+During later end-to-end flow training, swap between these surrogate + decoder + scatter branches so the flows see multiple LPAP bottleneck capacities rather than only one approximate top-`C` prior. This acts like structured dropout over level of detail: the energy space is useful only if reconstruction survives after different numbers of high-amplitude winners pass through LPAP.
 
 Implications:
 
-- Use distinct decoder/scatter paths per `C` rather than forcing one variable-token decoder to handle every compression level initially.
+- Use distinct surrogate + decoder/scatter paths per `C` rather than forcing one variable-token branch to handle every compression level initially.
 - The training loop needs either a `C` curriculum/sampling schedule or an explicit conditioning signal that tells the flow/autoencoder path which compression level is active.
 - Evaluation should report reconstruction/flow quality per `C`, plus aggregate robustness when `C` is sampled.
 

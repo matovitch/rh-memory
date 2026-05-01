@@ -12,7 +12,8 @@ Normative source:
 
 Scope note:
 
-- This page describes implemented training objectives only; roadmap regularizers and future memory dynamics belong in `doc_llm/notes/*`.
+- Stage 1 through Stage 3 describe implemented training objectives.
+- The end-to-end LPAP autoencoder section describes the next planned objective and should be updated when implementation lands.
 
 ## Stage 1: Surrogate Objective
 
@@ -115,3 +116,38 @@ Metric used in script:
 Soft-bridge note:
 
 - LPAP targets do not enter decoder L1 fine-tuning. The active reconstruction bridge uses full softmax scatter over all decoder slots, not expected-coordinate reduction and not hard argmax.
+
+## Planned Stage 4: End-to-End LPAP Autoencoder Objective
+
+Model:
+
+- image-to-energy flow
+- active `RHSurrogate`
+- active `RHDecoder`
+- active `SoftScatterReconstructionHead`
+- energy-to-image flow
+
+Input:
+
+- real grayscale image shards, Hilbert-flattened to `[B, 1, N]`.
+
+Path:
+
+- image sequence -> image-to-energy Euler integration -> learned unpooled energy -> surrogate -> decoder -> soft scatter -> pooled/projected energy -> energy-to-image Euler integration -> reconstructed image sequence.
+
+Loss:
+
+- reconstruction MSE between reconstructed image sequence and input image sequence.
+- weighted LPAP surrogate regularizer, computed as `RHSurrogateLoss`-style cross entropy between active surrogate logits and LPAP teacher slot targets from the current image-to-energy output.
+
+Explicit exclusions for the first implementation:
+
+- no cycle consistency loss.
+- no image-to-energy flow-matching side loss against raw harmonic energy.
+- no energy-to-image flow-matching side loss against frozen projected-energy/image pairs.
+- no latent-energy L1 reconstruction regularizer inside the bottleneck.
+
+Intent:
+
+- Existing harmonic/flow training initializes the system, but end-to-end training should be free to discover a better amplitude-ordered energy geometry for reconstruction through the LPAP bottleneck.
+- LPAP regularizes the surrogate so it remains an approximation of the discrete operator; LPAP does not pin the flow output to the harmonic pretraining distribution.

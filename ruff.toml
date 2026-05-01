@@ -1,3 +1,5 @@
+line-length = 120
+
 [lint]
 # jaxtyping shape annotations intentionally use strings like "B C N", which
 # Pyflakes otherwise tries to parse as Python forward references.

@@ -43,11 +43,11 @@ def _reshape_incoming_to_pipeline(
 
 
 def python_linear_probing_amplitude_pooling(
-    table_values      : Float [Tensor, "B C"],
-    table_dib         : Int   [Tensor, "B C"],
-    table_carry_id    : Int   [Tensor, "B C"],
-    incoming_values   : Float [Tensor, "B N"],
-    incoming_carry_id : Int   [Tensor, "B N"],
+    table_values: Float[Tensor, "B C"],
+    table_dib: Int[Tensor, "B C"],
+    table_carry_id: Int[Tensor, "B C"],
+    incoming_values: Float[Tensor, "B N"],
+    incoming_carry_id: Int[Tensor, "B N"],
     k: int,
 ) -> tuple[Float[Tensor, "B C"], Int[Tensor, "B C"], Int[Tensor, "B C"]]:
     """
@@ -78,15 +78,13 @@ def python_linear_probing_amplitude_pooling(
 
     _validate_lpap_dtypes(table_values, table_dib, table_carry_id, incoming_values, incoming_carry_id)
 
-    inc_vals, inc_carry = _reshape_incoming_to_pipeline(
-        incoming_values, incoming_carry_id, batch_size, stride
-    )
+    inc_vals, inc_carry = _reshape_incoming_to_pipeline(incoming_values, incoming_carry_id, batch_size, stride)
 
     inc_base_dib = torch.zeros((batch_size, stride, C), dtype=torch.int32, device=inc_vals.device)
 
-    disp_vals  = torch.empty_like(table_values)
+    disp_vals = torch.empty_like(table_values)
     disp_carry = torch.empty_like(table_carry_id)
-    disp_dib   = torch.empty_like(table_dib)
+    disp_dib = torch.empty_like(table_dib)
 
     for step in range(k):
         p_eff_dib = step + inc_base_dib

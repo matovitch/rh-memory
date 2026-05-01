@@ -70,4 +70,3 @@ def decoder_tokens_from_surrogate_logits_soft(
     soft_normalized_dib = torch.einsum("bcn,cn->bc", probs, dib)
     surrogate_doubt = normalized_entropy(probs)
     return torch.stack([soft_amplitude, soft_normalized_dib, surrogate_doubt], dim=-1)
-

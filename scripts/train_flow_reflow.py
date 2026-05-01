@@ -135,7 +135,9 @@ def main() -> None:
     print(f"Using device: {device}")
 
     direction: Direction = args.direction
-    args.teacher_checkpoint = resolve_project_path(args.teacher_checkpoint or default_teacher_checkpoint_path(direction))
+    args.teacher_checkpoint = resolve_project_path(
+        args.teacher_checkpoint or default_teacher_checkpoint_path(direction)
+    )
     args.init_checkpoint = resolve_project_path(args.init_checkpoint or args.teacher_checkpoint)
     args.checkpoint = resolve_project_path(args.checkpoint or default_checkpoint_path(direction))
 
@@ -227,7 +229,9 @@ def main() -> None:
         step = start_step + step_idx
         image_seq = next(image_iter)
         sample = next(surrogate_stream)
-        raw_energy_seq, projected_energy_seq = make_energy_batch(sample, decoder, scatter_head, config, energy_args, device)
+        raw_energy_seq, projected_energy_seq = make_energy_batch(
+            sample, decoder, scatter_head, config, energy_args, device
+        )
         if direction == "image-to-energy":
             source_seq = image_seq
             reference_seq = raw_energy_seq
@@ -274,14 +278,8 @@ def main() -> None:
                     reference_name: tensor_stats(reference_seq),
                 }
 
-            print(
-                f"Step {step} | Reflow MSE: {avg_loss:.6f} | "
-                f"VelCos: {velocity_cos:.4f} | VelRelL2: {velocity_rel:.2f}%"
-            )
-            print(
-                f"Teacher endpoint vs {reference_name} | "
-                f"{format_delta(teacher_delta)}"
-            )
+            print(f"Step {step} | MSE: {avg_loss:.6f} | VelCos: {velocity_cos:.4f} | VelRelL2: {velocity_rel:.2f}%")
+            print(f"Teacher endpoint vs {reference_name} | {format_delta(teacher_delta)}")
             for eval_steps in args.eval_steps:
                 print(
                     f"Student steps {eval_steps:>3} vs {reference_name} | "

@@ -86,7 +86,9 @@ def hilbert_flatten_images(images: Tensor, *, side: int = 32) -> Tensor:
 
     expected = (1, side, side)
     if tuple(images.shape[1:]) != expected:
-        raise ValueError(f"images must have shape [B, {expected[0]}, {expected[1]}, {expected[2]}], got {tuple(images.shape)}")
+        raise ValueError(
+            f"images must have shape [B, {expected[0]}, {expected[1]}, {expected[2]}], got {tuple(images.shape)}"
+        )
     flat = images.reshape(images.shape[0], 1, side * side)
     return flat.index_select(-1, hilbert_permutation(side, device=images.device))
 

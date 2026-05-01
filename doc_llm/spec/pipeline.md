@@ -72,3 +72,32 @@ Output tuple:
 4. surrogate weight `weights`: `[B, C]` (bucket-level amplitude weight, zeroed for invalid buckets)
 
 No decoder-to-token reconstruction adapter is part of the current pipeline contract.
+
+## Planned End-to-End LPAP Autoencoder Contract
+
+This section records the next implementation target. It is a planned contract, not yet implemented by the current pipeline stages.
+
+The LPAP autoencoder composes the pretrained components into a trainable image reconstruction path:
+
+1. `image_seq`: Hilbert-flattened grayscale image sequence `[B, 1, N]`.
+2. `learned_energy`: image-to-energy Euler integration output `[B, 1, N]`.
+3. `energy_values`: squeezed learned energy `[B, N]`.
+4. `energy_perm`: `energy_values` gathered by the active branch permutation `[B, N]`.
+5. `surrogate_tokens`: `reshape_permuted_to_bucket_tokens(energy_perm, C)` with shape `[B, C, stride]`.
+6. `surrogate_logits`: active `RHSurrogate` output `[B, C, N]`.
+7. `decoder_tokens`: soft tokens from `decoder_tokens_from_surrogate_logits_soft(energy_perm, surrogate_logits)` with shape `[B, C, 3]`.
+8. `decoder_logits`: active `RHDecoder` output `[B, C, N]`.
+9. `projected_energy`: active `SoftScatterReconstructionHead` output `[B, N]`, then unsqueezed to `[B, 1, N]`.
+10. `reconstructed_image_seq`: energy-to-image Euler integration output `[B, 1, N]`.
+
+The image-to-energy flow produces unpooled learned energy. The surrogate/decoder/scatter branch pools it through the LPAP-like bottleneck. The energy-to-image flow starts from the pooled/projected energy.
+
+### Bottleneck Branches And LoD
+
+The first implementation may only have one available bottleneck branch, currently `C=128`. The contract should still leave room for multiple active branches:
+
+- one surrogate per `C`, for example `C=64`, `C=128`, `C=256`
+- one decoder/scatter path per `C`
+- one active branch sampled or selected per forward pass
+
+Changing `C` changes the approximate top-`C` LPAP winners that pass through the bottleneck. This is the intended level-of-detail axis and acts as structured dropout pressure on the learned energy geometry.

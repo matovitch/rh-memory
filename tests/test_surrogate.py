@@ -45,6 +45,7 @@ def test_surrogate_forward_shape(surrogate_dims):
     assert logits.shape == expected, f"Expected {expected}, got {logits.shape}"
     assert torch.isfinite(logits).all()
 
+
 def test_surrogate_forward_shape_with_ring_causal_mask(surrogate_dims):
     model = RHSurrogate(
         sequence_length=surrogate_dims["n"],
@@ -93,4 +94,3 @@ def test_rhsurrogate_loss_ignores_invalid_buckets(surrogate_dims):
     loss = RHSurrogateLoss()(logits, target_idx, abs_amp, valid_bucket)
     assert torch.isfinite(loss)
     assert loss.item() == 0.0
-

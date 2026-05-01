@@ -13,3 +13,10 @@ data/
 # Pytorch artifacts
 *.pt
 *.pth
+
+# Local agent poll helper/artifacts
+scripts/agent_poll.py
+.agent_poll_answers.json
+
+# Generated script outputs
+scripts/outputs/

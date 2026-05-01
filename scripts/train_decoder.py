@@ -10,6 +10,7 @@ import torch.optim as optim
 from path_utils import project_relative_path, resolve_project_path
 
 from rh_memory.decoder import RHDecoder, RHDecoderDistillationLoss
+from rh_memory.decoder_scatter import SoftGatherTokenizationHead
 from rh_memory.surrogate import RHSurrogate
 
 from rh_memory.pipeline import (
@@ -83,6 +84,7 @@ def parse_args():
     p.add_argument("--num-layers", type=int, default=6)
     p.add_argument("--ff-mult", type=int, default=4)
     p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--init-gather-temperature", type=float, default=1.0)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--total-steps", type=int, default=50_000_000 // 128)
     p.add_argument("--eval-every", type=int, default=50_000 // 128)
@@ -103,10 +105,10 @@ def main():
     if args.checkpoint.exists():
         print(f"Loading checkpoint from {args.checkpoint}...")
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        if ckpt.get("version") != "v1_soft_decoder_distill":
+        if ckpt.get("version") != "v2_soft_decoder_distill_gather":
             raise ValueError(
                 f"Unsupported decoder checkpoint version {ckpt.get('version')!r}; "
-                "use a v1 soft decoder distillation checkpoint or choose a new --checkpoint path."
+                "use a v2 soft decoder distillation gather checkpoint or choose a new --checkpoint path."
             )
 
     training_seed = apply_training_seed(args.seed, ckpt)
@@ -155,13 +157,18 @@ def main():
         num_layers=args.num_layers,
         dim_feedforward=args.d_model * args.ff_mult,
     ).to(device)
+    gather_head = SoftGatherTokenizationHead(
+        init_temperature=args.init_gather_temperature,
+        min_temperature=0.05,
+    ).to(device)
 
     criterion = RHDecoderDistillationLoss(temperature=args.temperature)
-    optimizer = optim.AdamW(decoder.parameters(), lr=args.lr)
+    optimizer = optim.AdamW([*decoder.parameters(), *gather_head.parameters()], lr=args.lr)
 
     start_step = 0
     if ckpt is not None:
         decoder.load_state_dict(ckpt["model_state_dict"])
+        gather_head.load_state_dict(ckpt["gather_head_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_step = ckpt.get("step", 0)
         print(f"Resumed from step {start_step}")
@@ -172,8 +179,14 @@ def main():
         "num_layers": args.num_layers,
         "dim_feedforward": args.d_model * args.ff_mult,
     }
+    gather_head_config = {
+        "init_temperature": args.init_gather_temperature,
+        "min_temperature": gather_head.min_temperature,
+        "entropy_temperature": 1.0,
+    }
 
     decoder.train()
+    gather_head.train()
     running_loss = 0.0
     running_expected_err = 0.0
     batches_since_eval = 0
@@ -184,8 +197,9 @@ def main():
         sample = next(train_stream)
         step = start_step + step_idx
 
-        decoder_tokens = sample.decoder_tokens.to(device)
+        x_perm = sample.x_perm.to(device)
         teacher_logits = sample.surrogate_logits.to(device)
+        decoder_tokens = gather_head(x_perm, teacher_logits)
         weights = decoder_tokens[..., 0].abs()
 
         optimizer.zero_grad()
@@ -206,6 +220,7 @@ def main():
             avg_train_expected_err = running_expected_err / batches_since_eval
 
             decoder.eval()
+            gather_head.eval()
             test_loss = 0.0
             test_expected_err = 0.0
             teacher_doubt = 0.0
@@ -213,8 +228,9 @@ def main():
             test_batches = 0
             with torch.no_grad():
                 for sample_t in make_test_stream():
-                    decoder_tokens_t = sample_t.decoder_tokens.to(device)
+                    x_perm_t = sample_t.x_perm.to(device)
                     teacher_logits_t = sample_t.surrogate_logits.to(device)
+                    decoder_tokens_t = gather_head(x_perm_t, teacher_logits_t)
                     weights_t = decoder_tokens_t[..., 0].abs()
                     decoder_logits_t = decoder(decoder_tokens_t)[:, : config.C, : config.n]
                     test_loss += criterion(decoder_logits_t, teacher_logits_t, weights_t).item()
@@ -230,25 +246,30 @@ def main():
             avg_test_expected_err = test_expected_err / denom
             avg_teacher_doubt = teacher_doubt / denom
             avg_decoder_doubt = decoder_doubt / denom
+            gather_temperature = gather_head.temperature().item()
             print(
                 f"Step {step} | Train KL: {avg_train:.6f} | Train EIdxErr: {avg_train_expected_err:.4f} | "
                 f"Test KL: {avg_test:.6f} | Test EIdxErr: {avg_test_expected_err:.4f} | "
-                f"Teacher Doubt: {avg_teacher_doubt:.4f} | Decoder Doubt: {avg_decoder_doubt:.4f}"
+                f"Teacher Doubt: {avg_teacher_doubt:.4f} | Decoder Doubt: {avg_decoder_doubt:.4f} | "
+                f"Gather Temp: {gather_temperature:.4f}"
             )
 
             args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
-                    "version": "v1_soft_decoder_distill",
+                    "version": "v2_soft_decoder_distill_gather",
                     "checkpoint_role": "decoder",
                     "source_script": "scripts/train_decoder.py",
                     "step": step,
                     "model_state_dict": decoder.state_dict(),
+                    "gather_head_state_dict": gather_head.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "config": config.to_dict(),
                     "model_config": model_config,
+                    "gather_head_config": gather_head_config,
                     "surrogate_checkpoint": project_relative_path(args.surrogate_checkpoint),
                     "temperature": args.temperature,
+                    "init_gather_temperature": args.init_gather_temperature,
                     "seed": args.seed,
                     "seed_source": training_seed.source,
                 },
@@ -260,6 +281,7 @@ def main():
             running_expected_err = 0.0
             batches_since_eval = 0
             decoder.train()
+            gather_head.train()
 
     print("Training finished.")
 

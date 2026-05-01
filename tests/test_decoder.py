@@ -1,8 +1,10 @@
+import pytest
 import torch
 import torch.nn.functional as F
 
 from rh_memory.decoder import RHDecoder, RHDecoderDistillationLoss
-from rh_memory.decoder_scatter import SoftScatterReconstructionHead, decoder_soft_scatter
+from rh_memory.decoder_scatter import SoftGatherTokenizationHead, SoftScatterReconstructionHead, decoder_soft_scatter
+from rh_memory.pipeline.primitives_tokens import decoder_tokens_from_surrogate_logits_soft
 
 
 def test_decoder_forward_shape():
@@ -110,3 +112,52 @@ def test_soft_scatter_head_allows_gradient_flow_to_logits_and_temperature():
     assert torch.isfinite(logits.grad).all()
     assert head.raw_temperature.grad is not None
     assert torch.isfinite(head.raw_temperature.grad).all()
+
+
+def test_soft_gather_head_matches_existing_soft_tokenization_at_temperature_one():
+    B, C, n = 2, 3, 8
+    x_perm = torch.randn(B, n)
+    surrogate_logits = torch.randn(B, C, n)
+    head = SoftGatherTokenizationHead(init_temperature=1.0, min_temperature=0.05)
+
+    tokens = head(x_perm, surrogate_logits)
+    expected = decoder_tokens_from_surrogate_logits_soft(x_perm, surrogate_logits, temperature=1.0)
+
+    assert tokens.shape == (B, C, 3)
+    assert torch.allclose(tokens, expected, atol=1e-6)
+
+
+def test_soft_gather_head_learns_temperature_for_amplitude_and_dib_only():
+    B, C, n = 2, 3, 8
+    x_perm = torch.randn(B, n)
+    surrogate_logits = torch.randn(B, C, n, requires_grad=True)
+    head = SoftGatherTokenizationHead(init_temperature=0.7, min_temperature=0.05)
+
+    tokens = head(x_perm, surrogate_logits)
+    loss = tokens[..., :2].sum()
+    loss.backward()
+
+    assert tokens.shape == (B, C, 3)
+    assert surrogate_logits.grad is not None
+    assert torch.isfinite(surrogate_logits.grad).all()
+    assert head.raw_temperature.grad is not None
+    assert torch.isfinite(head.raw_temperature.grad).all()
+
+
+def test_soft_gather_head_uses_fixed_entropy_temperature():
+    B, C, n = 1, 2, 4
+    x_perm = torch.randn(B, n)
+    surrogate_logits = torch.randn(B, C, n)
+    head = SoftGatherTokenizationHead(init_temperature=0.35, min_temperature=0.05)
+
+    tokens = head(x_perm, surrogate_logits)
+    fixed_entropy_tokens = decoder_tokens_from_surrogate_logits_soft(x_perm, surrogate_logits, temperature=1.0)
+
+    assert torch.allclose(tokens[..., 2], fixed_entropy_tokens[..., 2], atol=1e-6)
+    assert not torch.allclose(tokens[..., :2], fixed_entropy_tokens[..., :2], atol=1e-6)
+
+
+def test_soft_gather_head_shape_mismatch_raises():
+    head = SoftGatherTokenizationHead()
+    with pytest.raises(ValueError):
+        _ = head(torch.randn(2, 8), torch.randn(2, 3, 7))

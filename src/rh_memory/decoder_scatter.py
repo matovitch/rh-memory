@@ -1,4 +1,4 @@
-"""Differentiable soft-scatter reconstruction heads for decoder logits."""
+"""Differentiable gather/scatter heads around decoder logits."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from jaxtyping import Float, Int
 from torch import Tensor
 
-from .pipeline.primitives_tokens import normalized_entropy
+from .pipeline.primitives_tokens import normalized_entropy, scalar_dib_table
 
 
 def _inverse_softplus(x: float) -> float:
@@ -94,3 +94,49 @@ class SoftScatterReconstructionHead(nn.Module):
         doubt = normalized_entropy(probs)
         support = effective_support(probs)
         return reconstruction, probs, doubt, support, temperature
+
+
+class SoftGatherTokenizationHead(nn.Module):
+    """Learnable-temperature soft gather from surrogate logits to decoder tokens."""
+
+    def __init__(self, init_temperature: float = 1.0, min_temperature: float = 0.05) -> None:
+        super().__init__()
+        if min_temperature <= 0:
+            raise ValueError(f"min_temperature must be positive, got {min_temperature}")
+        if init_temperature <= min_temperature:
+            raise ValueError(
+                f"init_temperature must be greater than min_temperature, "
+                f"got init_temperature={init_temperature}, min_temperature={min_temperature}"
+            )
+        self.min_temperature = float(min_temperature)
+        self.raw_temperature = nn.Parameter(
+            torch.tensor(_inverse_softplus(float(init_temperature) - self.min_temperature), dtype=torch.float32)
+        )
+
+    def temperature(self) -> Tensor:
+        return self.raw_temperature.new_tensor(self.min_temperature) + F.softplus(self.raw_temperature)
+
+    def forward(
+        self,
+        x_perm: Float[Tensor, "B N"],
+        surrogate_logits: Float[Tensor, "B C N"],
+    ) -> Float[Tensor, "B C 3"]:
+        if surrogate_logits.dim() != 3:
+            raise ValueError(f"surrogate_logits must have shape [B, C, N], got {tuple(surrogate_logits.shape)}")
+        B, C, n = surrogate_logits.shape
+        if x_perm.shape != (B, n):
+            raise ValueError(f"x_perm must have shape ({B}, {n}), got {tuple(x_perm.shape)}")
+
+        temperature = self.temperature().to(device=surrogate_logits.device, dtype=surrogate_logits.dtype)
+        gather_probs = F.softmax(surrogate_logits / temperature, dim=-1)
+        soft_amplitude = torch.einsum(
+            "bcn,bn->bc",
+            gather_probs,
+            x_perm.to(device=surrogate_logits.device, dtype=surrogate_logits.dtype),
+        )
+        dib = scalar_dib_table(C, n, device=surrogate_logits.device, dtype=surrogate_logits.dtype)
+        soft_normalized_dib = torch.einsum("bcn,cn->bc", gather_probs, dib)
+
+        entropy_probs = F.softmax(surrogate_logits, dim=-1)
+        surrogate_doubt = normalized_entropy(entropy_probs)
+        return torch.stack([soft_amplitude, soft_normalized_dib, surrogate_doubt], dim=-1)

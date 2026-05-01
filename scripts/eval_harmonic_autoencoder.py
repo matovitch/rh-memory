@@ -7,11 +7,12 @@ from pathlib import Path
 
 import torch
 
-from eval_lpap_autoencoder import normalize_energy_pair, resolve_device, save_grayscale_png, square_side
+from eval_lpap_autoencoder import resolve_device, save_grayscale_png, square_side
 from path_utils import resolve_project_path
 from train_flow_symmetric import load_soft_scatter_autoencoder, load_surrogate
 
 from rh_memory.pipeline import PipelineConfig, harmonic_stage, surrogate_stage
+from rh_memory.pooling_utils import lpap_pool
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,15 +60,99 @@ def make_projected_energy_batch(
     return raw_energy, projected_energy
 
 
-def build_energy_pair_grid(
-    raw_energy_images: torch.Tensor,
-    projected_energy_images: torch.Tensor,
+def make_lpap_bucket_energy_batch(sample, config: PipelineConfig, *, device: torch.device) -> torch.Tensor:
+    batch_size = sample.x_perm.shape[0]
+    table_values = torch.zeros(batch_size, config.C, dtype=torch.float32, device=device)
+    table_dib = torch.zeros(batch_size, config.C, dtype=torch.int32, device=device)
+    table_carry_id = torch.full((batch_size, config.C), -1, dtype=torch.int32, device=device)
+    slot_ids = torch.arange(config.n, dtype=torch.int32, device=device).unsqueeze(0).expand(batch_size, config.n)
+
+    values, _dib, out_slot_id = lpap_pool(
+        table_values,
+        table_dib,
+        table_carry_id,
+        sample.x_perm.to(device=device, dtype=torch.float32).clone(),
+        slot_ids.clone(),
+        config.k_eff,
+        device,
+    )
+
+    valid = (out_slot_id >= 0) & (out_slot_id < config.n)
+    safe_slot_id = out_slot_id.long().clamp(0, config.n - 1)
+    source_index = (
+        sample.perm_1d.to(device=device, dtype=torch.long).index_select(0, safe_slot_id.flatten()).view_as(safe_slot_id)
+    )
+    bucket_energy = torch.zeros(batch_size, config.n, dtype=torch.float32, device=device)
+    bucket_energy.scatter_(1, source_index, values.abs() * valid.to(dtype=values.dtype))
+    return bucket_energy.unsqueeze(1)
+
+
+def make_surrogate_hard_scatter_energy_batch(sample, config: PipelineConfig, *, device: torch.device) -> torch.Tensor:
+    surrogate_logits = sample.surrogate_logits.to(device)
+    decoder_tokens = sample.decoder_tokens.to(device)
+    batch_size = surrogate_logits.shape[0]
+    predicted_slot_id = surrogate_logits[:, : config.C, : config.n].argmax(dim=-1)
+    source_index = (
+        sample.perm_1d.to(device=device, dtype=torch.long)
+        .index_select(0, predicted_slot_id.flatten())
+        .view_as(predicted_slot_id)
+    )
+    surrogate_energy = torch.zeros(batch_size, config.n, dtype=decoder_tokens.dtype, device=device)
+    surrogate_energy.scatter_add_(1, source_index, decoder_tokens[:, : config.C, 0])
+    return surrogate_energy.unsqueeze(1)
+
+
+@torch.no_grad()
+def make_decoder_hard_scatter_energy_batch(
+    sample,
+    decoder,
+    config: PipelineConfig,
     *,
+    device: torch.device,
+    projected_energy_scale: float = 1.0,
+) -> torch.Tensor:
+    decoder_tokens = sample.decoder_tokens.to(device)
+    decoder_logits = decoder(decoder_tokens)[:, : config.C, : config.n]
+    predicted_slot_id = decoder_logits.argmax(dim=-1)
+    source_index = (
+        sample.perm_1d.to(device=device, dtype=torch.long)
+        .index_select(0, predicted_slot_id.flatten())
+        .view_as(predicted_slot_id)
+    )
+    decoder_energy = torch.zeros(decoder_tokens.shape[0], config.n, dtype=decoder_tokens.dtype, device=device)
+    decoder_energy.scatter_add_(1, source_index, decoder_tokens[:, : config.C, 0])
+    return decoder_energy.unsqueeze(1).mul(projected_energy_scale)
+
+
+def normalize_energy_panels(*energy_panels: torch.Tensor, side: int) -> tuple[torch.Tensor, ...]:
+    if not energy_panels:
+        raise ValueError("at least one energy panel is required")
+    panels = torch.cat([panel.abs() for panel in energy_panels], dim=1)
+    flat = panels.flatten(1)
+    panels_min = flat.amin(dim=1, keepdim=True).view(panels.shape[0], 1, 1)
+    panels_max = flat.amax(dim=1, keepdim=True).view(panels.shape[0], 1, 1)
+    normalized = (panels - panels_min) / (panels_max - panels_min).clamp_min(1e-8)
+    return tuple(normalized[:, idx : idx + 1].reshape(-1, 1, side, side) for idx in range(len(energy_panels)))
+
+
+def build_energy_panel_grid(
+    *energy_images: torch.Tensor,
     separator: int = 2,
 ) -> torch.Tensor:
-    batch_size, _channels, height, width = raw_energy_images.shape
-    vertical = torch.ones((batch_size, 1, height, separator), dtype=torch.float32, device=raw_energy_images.device)
-    rows = torch.cat((raw_energy_images, vertical, projected_energy_images), dim=3)
+    if not energy_images:
+        raise ValueError("at least one energy image is required")
+    batch_size, _channels, height, width = energy_images[0].shape
+    vertical = torch.ones((batch_size, 1, height, separator), dtype=torch.float32, device=energy_images[0].device)
+    row_parts: list[torch.Tensor] = []
+    for image_index, image in enumerate(energy_images):
+        if image.shape != energy_images[0].shape:
+            raise ValueError(
+                f"energy image {image_index} has shape {tuple(image.shape)}, expected {tuple(energy_images[0].shape)}"
+            )
+        row_parts.append(image)
+        if image_index + 1 != len(energy_images):
+            row_parts.append(vertical)
+    rows = torch.cat(row_parts, dim=3)
     horizontal = torch.ones((1, 1, separator, rows.shape[3]), dtype=torch.float32, device=rows.device)
     stacked_rows: list[torch.Tensor] = []
     for row_index in range(batch_size):
@@ -132,9 +217,37 @@ def main() -> None:
     )
     raw_energy = raw_energy[: args.num_samples]
     projected_energy = projected_energy[: args.num_samples]
+    lpap_bucket_energy = make_lpap_bucket_energy_batch(sample, config, device=device)[: args.num_samples]
+    surrogate_hard_energy = make_surrogate_hard_scatter_energy_batch(sample, config, device=device)[: args.num_samples]
+    decoder_hard_energy = make_decoder_hard_scatter_energy_batch(
+        sample,
+        decoder,
+        config,
+        device=device,
+        projected_energy_scale=args.projected_energy_scale,
+    )[: args.num_samples]
 
-    raw_energy_display, projected_energy_display = normalize_energy_pair(raw_energy, projected_energy, side=side)
-    grid = build_energy_pair_grid(raw_energy_display, projected_energy_display)
+    (
+        raw_energy_display,
+        lpap_bucket_energy_display,
+        surrogate_hard_energy_display,
+        decoder_hard_energy_display,
+        projected_energy_display,
+    ) = normalize_energy_panels(
+        raw_energy,
+        lpap_bucket_energy,
+        surrogate_hard_energy,
+        decoder_hard_energy,
+        projected_energy,
+        side=side,
+    )
+    grid = build_energy_panel_grid(
+        raw_energy_display,
+        lpap_bucket_energy_display,
+        surrogate_hard_energy_display,
+        decoder_hard_energy_display,
+        projected_energy_display,
+    )
 
     output_path = resolve_project_path(args.output)
     save_grayscale_png(grid, output_path)
@@ -150,7 +263,10 @@ def main() -> None:
     print(f"Surrogate checkpoint: {args.surrogate_checkpoint}")
     print(f"Soft-scatter checkpoint: {args.soft_scatter_checkpoint}")
     print(f"Surrogate temperature: {surrogate_temperature}")
-    print("Columns: raw_harmonic_energy | projected_energy")
+    print(
+        "Columns: raw_harmonic_energy | lpap_bucket_energy | surrogate_hard_scatter | "
+        "decoder_hard_scatter | projected_energy"
+    )
     print(f"Saved comparison grid to {output_path}")
     print("")
     for sample_index in range(args.num_samples):

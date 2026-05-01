@@ -26,6 +26,7 @@ train-lpap-autoencoder = "python scripts/train_lpap_autoencoder.py"
 eval-flow-i2e = "python scripts/eval_image_to_energy_distributions.py"
 eval-flow-e2i = "python scripts/eval_energy_to_image_distributions.py"
 eval-lpap-autoencoder = "python scripts/eval_lpap_autoencoder.py"
+eval-harmonic-autoencoder = "python scripts/eval_harmonic_autoencoder.py"
 train-reflow-i2e = "python scripts/train_flow_reflow.py --direction image-to-energy --teacher-checkpoint scripts/checkpoints/symmetric_flow_image_to_energy_checkpoint.pt --teacher-steps 128 --checkpoint scripts/checkpoints/reflow_image_to_energy_checkpoint.pt"
 train-reflow-e2i = "python scripts/train_flow_reflow.py --direction energy-to-image --teacher-checkpoint scripts/checkpoints/symmetric_flow_energy_to_image_checkpoint.pt --teacher-steps 128 --checkpoint scripts/checkpoints/reflow_energy_to_image_checkpoint.pt"
 
